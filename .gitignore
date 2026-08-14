@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temp/Debug
+check.js
+check2.js
+check3.js
+cleanup.js
+count.js
+test_db.js
+test_gemini.js
+uploaded_ptn_logos.json
+update_admin_password.js
