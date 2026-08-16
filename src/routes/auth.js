@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
@@ -7,6 +8,7 @@ const { verifyToken } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 const { OAuth2Client } = require('google-auth-library');
 const { getJwtSecret } = require('../config/jwt');
+const { sendPasswordResetEmail } = require('../services/emailService');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -328,6 +330,164 @@ router.put('/update-password', verifyToken, authLimiter, async (req, res, next) 
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newPasswordHash, req.user.id]);
 
     res.json({ success: true, message: 'Password berhasil diperbarui.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Request Forgot Password (Magic Link)
+router.post('/forgot-password', authLimiter, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email wajib diisi.' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ success: false, error: 'Format email tidak valid.' });
+    }
+
+    const genericSuccessMessage = 'Jika email terdaftar, kami telah mengirimkan tautan reset password. Silakan periksa kotak masuk atau spam email kamu.';
+
+    const userResult = await pool.query(
+      'SELECT id, name, email, google_id, password_hash FROM users WHERE LOWER(email) = $1',
+      [normalizedEmail]
+    );
+
+    if (userResult.rows.length === 0) {
+      // Return generic message to prevent email enumeration
+      return res.json({ success: true, message: genericSuccessMessage });
+    }
+
+    const user = userResult.rows[0];
+
+    // Jika akun terdaftar via Google murni (tidak punya password), user tinggal login via Google
+    if (user.google_id && !user.password_hash) {
+      return res.json({
+        success: true,
+        message: genericSuccessMessage,
+      });
+    }
+
+    // Generate secure random reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 menit
+
+    await pool.query(
+      'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE id = $3',
+      [resetToken, expiresAt, user.id]
+    );
+
+    const clientUrl = process.env.CLIENT_URL || 'https://stubia.id';
+    const resetLink = `${clientUrl.replace(/\/$/, '')}/reset-password?token=${resetToken}`;
+
+    // Send email via Brevo
+    sendPasswordResetEmail(user.email, user.name, resetLink).catch((err) =>
+      console.error('Failed to send reset password email:', err)
+    );
+
+    res.json({
+      success: true,
+      message: genericSuccessMessage,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Verify Reset Password Token
+router.get('/verify-reset-token', async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).json({ success: false, valid: false, error: 'Token tidak valid.' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1',
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        error: 'Tautan reset password tidak valid atau sudah pernah digunakan.',
+      });
+    }
+
+    const user = result.rows[0];
+    const isExpired = new Date(user.reset_password_expires).getTime() < Date.now();
+
+    if (isExpired) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        error: 'Tautan reset password sudah kadaluarsa (melebihi 15 menit). Silakan ajukan permintaan baru.',
+      });
+    }
+
+    res.json({ success: true, valid: true, email: user.email });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Reset Password
+router.post('/reset-password', authLimiter, async (req, res, next) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+      return res.status(400).json({ success: false, error: 'Token dan password baru wajib diisi.' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password baru harus minimal 6 karakter.' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1',
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tautan reset password tidak valid atau sudah pernah digunakan. Silakan minta tautan baru.',
+      });
+    }
+
+    const user = result.rows[0];
+    const isExpired = new Date(user.reset_password_expires).getTime() < Date.now();
+
+    if (isExpired) {
+      // Clear expired token
+      await pool.query(
+        'UPDATE users SET reset_password_token = NULL, reset_password_expires = NULL WHERE id = $1',
+        [user.id]
+      );
+      return res.status(400).json({
+        success: false,
+        error: 'Tautan reset password sudah kadaluarsa (melebihi 15 menit). Silakan ajukan permintaan baru.',
+      });
+    }
+
+    // Hash new password
+    const saltRounds = 12;
+    const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update password and invalidate token
+    await pool.query(
+      'UPDATE users SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL WHERE id = $2',
+      [newPasswordHash, user.id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Password berhasil diubah! Silakan masuk dengan password baru kamu.',
+    });
   } catch (error) {
     next(error);
   }

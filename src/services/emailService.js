@@ -612,10 +612,66 @@ ${hr()}
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. PASSWORD RESET (MAGIC LINK)
+// ─────────────────────────────────────────────────────────────────────────────
+async function sendPasswordResetEmail(userEmail, userName, resetLink) {
+  const subject = "Atur Ulang Password Akun Stubia";
+
+  const html = baseTemplate({
+    preheader: "Permintaan reset password akun Stubia kamu. Tautan ini hanya berlaku selama 15 menit.",
+    headerLabel: "Keamanan Akun",
+    headerTitle: "Atur Ulang Password",
+    accentColor: "#0050cb",
+    body: `
+<p style="margin:0 0 6px;font-size:15px;color:#374151;line-height:1.8;">Halo <strong style="color:#111827;">${userName || 'Sobat Stubia'}</strong>,</p>
+
+<p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.8;">
+  Kami menerima permintaan untuk mengatur ulang password akun Stubia kamu. Silakan klik tombol di bawah ini untuk membuat password baru:
+</p>
+
+${cta({ href: resetLink, label: "Atur Ulang Password Sekarang", color: "#0050cb" })}
+
+${callout({
+  text: "<strong>Perhatian:</strong> Tautan magic link ini hanya berlaku selama <strong>15 menit</strong> dan hanya dapat digunakan <strong>satu kali</strong> demi keamanan akunmu.<br/><br/>Jika kamu tidak merasa mengajukan permintaan ini, kamu dapat mengabaikan email ini dengan aman. Password akunmu tidak akan berubah.",
+  bg: "#fef3c7",
+  border: "#f59e0b",
+})}
+
+${hr()}
+
+<p style="margin:0 0 10px;font-size:13px;color:#6b7280;line-height:1.6;">
+  Jika tombol di atas tidak dapat diklik, salin dan buka tautan berikut di browser kamu:
+</p>
+<p style="margin:0 0 16px;font-size:12px;word-break:break-all;color:#0050cb;">
+  <a href="${resetLink}" style="color:#0050cb;text-decoration:underline;">${resetLink}</a>
+</p>
+
+${hr()}
+
+<p style="margin:0 0 24px;font-size:14px;color:#6b7280;line-height:1.8;">
+  Jika kamu membutuhkan bantuan lebih lanjut, silakan hubungi tim kami melalui <a href="https://stubia.id/contact-us" style="color:#0050cb;text-decoration:none;">halaman kontak</a>.
+</p>
+
+<p style="margin:0;font-size:14px;color:#374151;line-height:1.8;">
+  Salam hangat,<br/>
+  <strong style="color:#111827;">Tim Keamanan Stubia.id</strong>
+</p>`,
+  });
+
+  return sendEmail({
+    toEmail: userEmail,
+    toName: userName || userEmail,
+    subject,
+    html,
+  });
+}
+
 module.exports = {
   sendWelcomeEmail,
   sendPremiumPlanActivatedEmail,
   sendTryoutRegistrationApprovedEmail,
   sendTryoutRegistrationRejectedEmail,
   sendJobApplicationSubmittedEmail,
+  sendPasswordResetEmail,
 };
