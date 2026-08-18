@@ -15,14 +15,71 @@ router.post('/validate', verifyToken, voucherLimiter, async (req, res, next) => 
 
     const cleanedCode = code.trim().toUpperCase();
 
-    // 1. Fetch voucher
+    // 1. Fetch voucher from vouchers table
     const voucherRes = await pool.query(
       `SELECT * FROM vouchers WHERE UPPER(code) = $1 AND is_active = true`,
       [cleanedCode]
     );
 
     if (voucherRes.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Kode voucher tidak valid.' });
+      // Check if it's a valid Mitra Referral Code
+      const mitraRes = await pool.query(
+        `SELECT id, name, referral_code, status FROM mitra_users WHERE UPPER(referral_code) = $1`,
+        [cleanedCode]
+      );
+
+      if (mitraRes.rows.length > 0) {
+        const mitra = mitraRes.rows[0];
+        if (mitra.status !== 'active') {
+          return res.status(400).json({
+            success: false,
+            error: 'Kode referral mitra belum aktif atau sedang dalam peninjauan.',
+          });
+        }
+
+        // Calculate Cart Price
+        const plansRes = await pool.query(
+          `SELECT price FROM plans WHERE id = ANY($1)`,
+          [planIds]
+        );
+        if (plansRes.rows.length === 0) {
+          return res.status(400).json({ success: false, error: 'Paket tidak ditemukan.' });
+        }
+
+        const totalOriginal = plansRes.rows.reduce((sum, row) => sum + row.price, 0);
+
+        // Fetch discount % from mitra_settings (default 10%)
+        let discountPercent = 10;
+        try {
+          const settingRes = await pool.query(
+            `SELECT value FROM mitra_settings WHERE key = 'buyer_discount_percent'`
+          );
+          if (settingRes.rows.length > 0) {
+            discountPercent = parseInt(settingRes.rows[0].value, 10) || 10;
+          }
+        } catch (e) {}
+
+        const discount = Math.floor((totalOriginal * discountPercent) / 100);
+        const finalTotal = Math.max(0, totalOriginal - discount);
+
+        return res.json({
+          success: true,
+          data: {
+            voucherId: null,
+            isReferral: true,
+            referralCode: mitra.referral_code,
+            code: mitra.referral_code,
+            discountType: 'percentage',
+            discountValue: discountPercent,
+            discount,
+            totalOriginal,
+            finalTotal,
+            message: `Diskon referral mitra (${mitra.name}) sebesar ${discountPercent}% berhasil diterapkan!`,
+          },
+        });
+      }
+
+      return res.status(404).json({ success: false, error: 'Kode voucher atau referral tidak valid.' });
     }
 
     const voucher = voucherRes.rows[0];

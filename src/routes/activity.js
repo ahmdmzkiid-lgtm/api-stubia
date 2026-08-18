@@ -118,44 +118,86 @@ router.post("/latihan/submit", verifyToken, async (req, res, next) => {
       }
     }
 
-    // Build IRT answer objects from client data
+    // Fetch true question data and choices securely from database
+    const questionIds = questions.map((q) => q.id).filter(Boolean);
+    let dbQuestionsMap = new Map();
+
+    if (questionIds.length > 0) {
+      if (latihan_id) {
+        const dbRes = await pool.query(
+          `SELECT q.id, q.difficulty, q.question_type,
+                  COALESCE(json_agg(json_build_object(
+                    'id', ac.id, 'label', ac.label, 'content', ac.content,
+                    'is_correct', ac.is_correct
+                  ) ORDER BY ac.label) FILTER (WHERE ac.id IS NOT NULL), '[]') as choices
+           FROM um_questions q
+           LEFT JOIN um_answer_choices ac ON ac.question_id = q.id
+           WHERE q.id = ANY($1::uuid[])
+           GROUP BY q.id`,
+          [questionIds]
+        );
+        dbRes.rows.forEach((r) => dbQuestionsMap.set(r.id, r));
+      } else {
+        const dbRes = await pool.query(
+          `SELECT q.id, q.difficulty, q.question_type, s.name as subject_name,
+                  COALESCE(json_agg(json_build_object(
+                    'id', ac.id, 'label', ac.label, 'content', ac.content,
+                    'is_correct', ac.is_correct
+                  ) ORDER BY ac.label) FILTER (WHERE ac.id IS NOT NULL), '[]') as choices
+           FROM questions q
+           LEFT JOIN subjects s ON q.subject_id = s.id
+           LEFT JOIN answer_choices ac ON ac.question_id = q.id
+           WHERE q.id = ANY($1::uuid[])
+           GROUP BY q.id, s.name`,
+          [questionIds]
+        );
+        dbRes.rows.forEach((r) => dbQuestionsMap.set(r.id, r));
+      }
+    }
+
+    // Build IRT answer objects securely verified from DB
     const irtAnswers = questions.map((q, idx) => {
+      const dbQ = dbQuestionsMap.get(q.id);
+      const dbChoices = dbQ ? (Array.isArray(dbQ.choices) ? dbQ.choices : []) : [];
+      const questionType = dbQ?.question_type || q.question_type || "multiple_choice";
+      const difficulty = dbQ?.difficulty || q.difficulty || "medium";
+      const resolvedSubject = dbQ?.subject_name || subject_name || "Latihan";
+
       const chosenId = answers[idx] || answers[String(idx)] || null;
       let isCorrect = false;
-      let chosenChoice = null;
 
-      if (q.question_type === "short_answer") {
-        const correctChoice = (q.choices || []).find((c) => c.is_correct);
+      if (questionType === "short_answer") {
+        const correctChoice = dbChoices.find((c) => c.is_correct === true);
         isCorrect = !!(
           correctChoice &&
           chosenId &&
           correctChoice.content.trim().toLowerCase() ===
             String(chosenId).trim().toLowerCase()
         );
-      } else if (q.question_type === "complex_mc_tf") {
+      } else if (questionType === "complex_mc_tf") {
         let userAnswersObj = {};
         try {
           userAnswersObj = chosenId ? (typeof chosenId === "object" ? chosenId : JSON.parse(chosenId)) : {};
         } catch (e) {}
-        isCorrect = (q.choices || []).length > 0 && (q.choices || []).every((c) => {
+        isCorrect = dbChoices.length > 0 && dbChoices.every((c) => {
           const studentAns = userAnswersObj[c.label];
-          return studentAns !== undefined && studentAns === c.is_correct;
+          return studentAns !== undefined && studentAns === (c.is_correct === true);
         });
       } else {
-        chosenChoice = chosenId
-          ? (q.choices || []).find((c) => c.id === chosenId)
+        const chosenChoice = chosenId
+          ? dbChoices.find((c) => c.id === chosenId)
           : null;
         isCorrect = chosenChoice?.is_correct === true;
       }
 
       return {
-        chosen_choice_id: (q.question_type === "short_answer" || q.question_type === "complex_mc_tf") ? null : chosenId,
-        answer_text: (q.question_type === "short_answer" || q.question_type === "complex_mc_tf") ? chosenId : null,
+        chosen_choice_id: (questionType === "short_answer" || questionType === "complex_mc_tf") ? null : chosenId,
+        answer_text: (questionType === "short_answer" || questionType === "complex_mc_tf") ? chosenId : null,
         is_correct: isCorrect,
         question_id: q.id,
-        question_type: q.question_type || "multiple_choice",
-        difficulty: q.difficulty || "medium",
-        subject_name: subject_name || "Latihan",
+        question_type: questionType,
+        difficulty: difficulty,
+        subject_name: resolvedSubject,
         time_spent_sec: 0,
       };
     });

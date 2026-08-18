@@ -56,7 +56,8 @@ async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
 
   const completedAttempts = groups.filter(g => g.isCompleted).length;
   const attemptsUsed = groups.length;
-  const canAttempt = completedAttempts < 2;
+  const isLatestAttemptActive = currentGroup && !currentGroup.isCompleted && ((Date.now() - new Date(currentGroup.latestStartedAt).getTime()) / 3600000 <= 12);
+  const canAttempt = completedAttempts < 2 && (attemptsUsed < 2 || isLatestAttemptActive);
 
   return {
     attemptsUsed,

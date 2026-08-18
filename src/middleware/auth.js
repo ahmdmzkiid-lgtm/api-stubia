@@ -57,6 +57,9 @@ const verifyAdmin = async (req, res, next) => {
         "/api/soal",
         "/api/tryout",
         "/api/ujian-mandiri",
+        "/api/skd",
+        "/api/tka",
+        "/api/social",
         "/api/subjects",
         "/api/topics",
         "/api/import",
@@ -66,7 +69,16 @@ const verifyAdmin = async (req, res, next) => {
         return next();
       }
       if (baseUrl === "/api/admin") {
-        if (["/stats", "/tryout-dashboard-stats", "/questions/duplicates", "/activity-logs", "/question-review"].includes(path)) {
+        if (
+          [
+            "/stats",
+            "/tryout-dashboard-stats",
+            "/questions/duplicates",
+            "/activity-logs",
+            "/question-review",
+            "/tryout-registrations"
+          ].some((p) => path.startsWith(p))
+        ) {
           return next();
         }
       }

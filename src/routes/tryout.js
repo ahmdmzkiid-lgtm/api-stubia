@@ -51,6 +51,50 @@ function parseLocalDate(dateVal) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// --- Get Allocated Duration in Seconds for Session Helper ---
+async function getSessionAllocatedDurationSec(dbOrPool, sessionId) {
+  try {
+    const res = await dbOrPool.query(
+      `SELECT ts.started_at, tp.subject_config,
+         ARRAY_AGG(DISTINCT LOWER(s.name)) as subtest_names
+       FROM tryout_sessions ts
+       JOIN tryout_packages tp ON ts.package_id = tp.id
+       JOIN user_answers ua ON ua.session_id = ts.id
+       JOIN questions q ON ua.question_id = q.id
+       LEFT JOIN subjects s ON q.subject_id = s.id
+       WHERE ts.id = $1
+       GROUP BY ts.id, ts.started_at, tp.subject_config`,
+      [sessionId]
+    );
+    if (res.rows.length === 0) return null;
+    const { started_at, subject_config, subtest_names } = res.rows[0];
+    let config = subject_config;
+    if (typeof config === "string") {
+      try { config = JSON.parse(config); } catch { config = []; }
+    }
+    if (!Array.isArray(config)) config = [];
+
+    const lowerNames = (subtest_names || []).filter(Boolean);
+    let totalAllocatedSec = 0;
+    if (config.length > 0 && lowerNames.length > 0) {
+      config.forEach((sub) => {
+        if (lowerNames.includes((sub.name || "").toLowerCase())) {
+          const min = Number(sub.durationMin || sub.duration || 30);
+          const sec = Number(sub.durationSec || 0);
+          totalAllocatedSec += min * 60 + sec;
+        }
+      });
+    }
+    if (totalAllocatedSec === 0) {
+      totalAllocatedSec = 30 * 60; // 30 mins fallback
+    }
+    return { started_at: new Date(started_at), totalAllocatedSec };
+  } catch (err) {
+    console.error("[DURATION CHECK] Error querying duration:", err.message);
+    return null;
+  }
+}
+
 // --- Auto Submit Expired Tryout Sessions Helper ---
 async function autoSubmitSession(dbOrPool, sessionId, userId) {
   try {
@@ -658,6 +702,12 @@ router.get(
         );
         isCompleted = sessionRes.rows.length > 0;
       }
+      let target_ptn = null;
+      let target_major = null;
+      let completedSubtests = [];
+      let activeSessions = {};
+      let answeredCounts = {};
+
       let attemptInfo = null;
       if (packageType === "utbk") {
         const sessionTargetRes = await pool.query(
@@ -673,12 +723,42 @@ router.get(
         if (attemptInfo.completedAttempts >= 2) {
           isCompleted = true;
         }
+
+        // Hydrate active attempt's subtests for multi-device/cache persistence
+        const activeAttemptSessions = await pool.query(
+          `SELECT ts.id, ts.submitted_at,
+             (SELECT s.name FROM user_answers ua
+              JOIN questions q ON ua.question_id = q.id
+              LEFT JOIN subjects s ON q.subject_id = s.id
+              WHERE ua.session_id = ts.id AND s.name IS NOT NULL
+              GROUP BY s.name ORDER BY COUNT(*) DESC LIMIT 1) as subtest_name,
+             (SELECT COUNT(*) FROM user_answers ua2
+              WHERE ua2.session_id = ts.id AND (ua2.chosen_choice_id IS NOT NULL OR (ua2.answer_text IS NOT NULL AND ua2.answer_text != ''))) as answered_count
+           FROM tryout_sessions ts
+           WHERE ts.user_id = $1 AND ts.package_id = $2
+             AND ts.started_at >= NOW() - INTERVAL '24 hours'
+           ORDER BY ts.started_at ASC`,
+          [req.user.id, packageId]
+        );
+
+        activeAttemptSessions.rows.forEach(r => {
+          if (r.subtest_name) {
+            activeSessions[r.subtest_name] = r.id;
+            answeredCounts[r.subtest_name] = parseInt(r.answered_count || 0, 10);
+            if (r.submitted_at) {
+              completedSubtests.push(r.subtest_name);
+            }
+          }
+        });
       }
 
       const responsePayload = {
         completed: isCompleted,
         target_ptn,
         target_major,
+        completed_subtests: completedSubtests,
+        active_sessions: activeSessions,
+        answered_counts: answeredCounts,
         attempt_info: attemptInfo,
         completed_attempts: attemptInfo?.completedAttempts || 0,
         attempts_used: attemptInfo?.attemptsUsed || 0,
@@ -1280,6 +1360,19 @@ router.post("/answer", verifyToken, async (req, res, next) => {
       return res.status(403).json({ success: false, error: "Akses ditolak atau sesi tryout telah dikumpulkan." });
     }
 
+    // Check if session time has expired (+ 5 minutes grace period for network latency)
+    const durationInfo = await getSessionAllocatedDurationSec(pool, session_id);
+    if (durationInfo) {
+      const elapsedSec = (Date.now() - durationInfo.started_at.getTime()) / 1000;
+      if (elapsedSec > durationInfo.totalAllocatedSec + 300) {
+        return res.status(400).json({
+          success: false,
+          error: "Waktu pengerjaan tryout telah habis. Jawaban tidak dapat disimpan.",
+          code: "SESSION_EXPIRED",
+        });
+      }
+    }
+
     await pool.query(
       `UPDATE user_answers
        SET chosen_choice_id = $1,
@@ -1322,6 +1415,20 @@ router.post("/answer-batch", verifyToken, async (req, res, next) => {
     if (sessionCheck.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(403).json({ success: false, error: "Akses ditolak atau sesi tryout telah dikumpulkan." });
+    }
+
+    // Check if session time has expired (+ 5 minutes grace period for network latency)
+    const durationInfo = await getSessionAllocatedDurationSec(client, session_id);
+    if (durationInfo) {
+      const elapsedSec = (Date.now() - durationInfo.started_at.getTime()) / 1000;
+      if (elapsedSec > durationInfo.totalAllocatedSec + 300) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          success: false,
+          error: "Waktu pengerjaan tryout telah habis. Jawaban tidak dapat disimpan.",
+          code: "SESSION_EXPIRED",
+        });
+      }
     }
 
     for (const ans of answers) {
@@ -2545,6 +2652,43 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
   }
 });
 
+// Helper to auto mark package completed when all subtests in attempt are done
+async function checkAndMarkPackageCompletedIfFinished(dbOrPool, userId, sessionId) {
+  try {
+    const pkgConfigRes = await dbOrPool.query(
+      `SELECT ts.package_id, tp.subject_config FROM tryout_sessions ts
+       JOIN tryout_packages tp ON ts.package_id = tp.id
+       WHERE ts.id = $1`,
+      [sessionId]
+    );
+    if (pkgConfigRes.rows.length > 0) {
+      const { package_id, subject_config } = pkgConfigRes.rows[0];
+      let config = subject_config;
+      if (typeof config === "string") {
+        try { config = JSON.parse(config); } catch { config = []; }
+      }
+      const totalExpectedSubtests = Array.isArray(config) && config.length > 0 ? config.length : 7;
+
+      const completedCountRes = await dbOrPool.query(
+        `SELECT COUNT(DISTINCT s.name) as completed_subtests
+         FROM tryout_sessions ts
+         JOIN user_answers ua ON ua.session_id = ts.id
+         JOIN questions q ON ua.question_id = q.id
+         JOIN subjects s ON q.subject_id = s.id
+         WHERE ts.user_id = $1 AND ts.package_id = $2 AND ts.submitted_at IS NOT NULL
+           AND ts.started_at >= NOW() - INTERVAL '24 hours'`,
+        [userId, package_id]
+      );
+      const completedCount = parseInt(completedCountRes.rows[0]?.completed_subtests || 0, 10);
+      if (completedCount >= totalExpectedSubtests) {
+        await markPackageCompleted(dbOrPool, userId, "utbk", package_id);
+      }
+    }
+  } catch (e) {
+    console.error("[AUTO-COMPLETE-PACKAGE] Error checking completion:", e.message);
+  }
+}
+
 // Submit Tryout
 router.post("/submit", verifyToken, async (req, res, next) => {
   try {
@@ -2699,6 +2843,9 @@ router.post("/submit", verifyToken, async (req, res, next) => {
        WHERE id = $3`,
       [finalResults.totalScore, JSON.stringify(finalResults), session_id],
     );
+
+    // Check if entire package attempt is finished and mark completed
+    await checkAndMarkPackageCompletedIfFinished(pool, req.user.id, session_id);
 
     console.log("[SUBMIT] Session updated successfully");
     res.json({
@@ -2925,6 +3072,9 @@ router.post("/submit-bulk", verifyToken, async (req, res, next) => {
          WHERE id = $3`,
         [finalResults.totalScore, JSON.stringify(finalResults), sessionId],
       );
+
+      // Check if entire package attempt is finished and mark completed
+      await checkAndMarkPackageCompletedIfFinished(pool, userId, sessionId);
 
       console.log(`[SUBMIT-BULK] Session ${sessionId} submitted successfully`);
 

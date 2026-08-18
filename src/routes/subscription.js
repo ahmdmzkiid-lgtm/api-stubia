@@ -269,7 +269,6 @@ async function activateUserPlansByTx(dbClient, tx) {
        ON CONFLICT (user_id, voucher_id) DO NOTHING`,
       [userId, tx.voucher_id, orderId]
     );
-    // Only increment usage_count if a new row was actually inserted
     if (voucherInsert.rowCount > 0) {
       await dbClient.query(
         `UPDATE vouchers SET usage_count = usage_count + 1 WHERE id = $1`,
@@ -278,14 +277,98 @@ async function activateUserPlansByTx(dbClient, tx) {
     }
   }
 
+  // Process mitra affiliate referral commission if referral code is present
+  try {
+    await processMitraReferralSettlement(dbClient, tx);
+  } catch (mitraErr) {
+    console.error('Error processing mitra referral commission:', mitraErr);
+  }
+
   return true;
 }
 
-// ─── POST /checkout ─── Process cart checkout with optional voucher code
+// ─── Helper to credit commission to mitra on settled referral purchase ───
+async function processMitraReferralSettlement(dbClient, tx) {
+  if (!tx.referral_code && !tx.mitra_id) return;
+
+  let mitraId = tx.mitra_id;
+  if (!mitraId && tx.referral_code) {
+    const mRes = await dbClient.query(
+      'SELECT id FROM mitra_users WHERE referral_code = $1',
+      [tx.referral_code.toUpperCase()]
+    );
+    if (mRes.rows.length > 0) {
+      mitraId = mRes.rows[0].id;
+    }
+  }
+  if (!mitraId) return;
+
+  // Check if commission was already processed for this order
+  const existingTx = await dbClient.query(
+    'SELECT id, status FROM mitra_transactions WHERE order_id = $1',
+    [tx.order_id]
+  );
+
+  // Get commission settings
+  const commRes = await dbClient.query(
+    "SELECT value FROM mitra_settings WHERE key = 'commission_percent'"
+  );
+  const commPercent = parseInt(commRes.rows[0]?.value || '10', 10);
+  const commissionAmount = Math.floor((tx.amount * commPercent) / 100);
+
+  // Get buyer details
+  const buyerRes = await dbClient.query('SELECT name, email FROM users WHERE id = $1', [tx.user_id]);
+  const buyer = buyerRes.rows[0] || {};
+
+  // Get product names
+  const itemsRes = await dbClient.query(
+    `SELECT p.display_name FROM order_items oi JOIN plans p ON p.id = oi.plan_id WHERE oi.transaction_id = $1`,
+    [tx.id]
+  );
+  const productName = itemsRes.rows.map(r => r.display_name).join(', ') || 'Paket Belajar Stubia';
+
+  if (existingTx.rows.length > 0) {
+    if (existingTx.rows[0].status !== 'settled') {
+      await dbClient.query(
+        `UPDATE mitra_transactions
+         SET status = 'settled', settled_at = NOW(), commission_amount = $1, updated_at = NOW()
+         WHERE order_id = $2`,
+        [commissionAmount, tx.order_id]
+      );
+      await dbClient.query(
+        `UPDATE mitra_users SET balance = balance + $1, updated_at = NOW() WHERE id = $2`,
+        [commissionAmount, mitraId]
+      );
+    }
+  } else {
+    await dbClient.query(
+      `INSERT INTO mitra_transactions (
+         mitra_id, order_id, payment_transaction_id, buyer_name, buyer_email,
+         product_name, total_price, commission_amount, status, settled_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'settled', NOW())`,
+      [
+        mitraId,
+        tx.order_id,
+        tx.id,
+        buyer.name || 'Siswa Stubia',
+        buyer.email || '',
+        productName,
+        tx.amount,
+        commissionAmount,
+      ]
+    );
+    await dbClient.query(
+      `UPDATE mitra_users SET balance = balance + $1, updated_at = NOW() WHERE id = $2`,
+      [commissionAmount, mitraId]
+    );
+  }
+}
+
+// ─── POST /checkout ─── Process cart checkout with optional voucher code & referral code
 router.post('/checkout', verifyToken, async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { planIds, voucherCode, paymentMethod } = req.body;
+    const { planIds, voucherCode, referralCode, paymentMethod } = req.body;
     if (!planIds || !Array.isArray(planIds) || planIds.length === 0) {
       return res.status(400).json({ success: false, error: 'planIds array is required.' });
     }
@@ -305,9 +388,11 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
 
     const totalOriginal = plansRes.rows.reduce((sum, row) => sum + row.price, 0);
 
-    // 2. Validate voucher if provided
+    // 2. Validate voucher or referral code
     let voucher = null;
     let discount = 0;
+    let validMitra = null;
+    let appliedRefCode = null;
 
     if (voucherCode) {
       const cleanedCode = voucherCode.trim().toUpperCase();
@@ -317,49 +402,102 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
       );
 
       if (voucherRes.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'Kode voucher tidak valid.' });
-      }
+        // Check if it is a valid Mitra Referral Code
+        const mitraRes = await client.query(
+          `SELECT id, name, referral_code, status FROM mitra_users WHERE UPPER(referral_code) = $1`,
+          [cleanedCode]
+        );
 
-      voucher = voucherRes.rows[0];
+        if (mitraRes.rows.length > 0) {
+          validMitra = mitraRes.rows[0];
+          if (validMitra.status !== 'active') {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, error: 'Kode referral mitra belum aktif.' });
+          }
+          appliedRefCode = validMitra.referral_code;
 
-      if (new Date(voucher.expires_at) < new Date()) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'Voucher telah kedaluwarsa.' });
-      }
-
-      if (voucher.usage_limit !== null && voucher.usage_count >= voucher.usage_limit) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'Kuota penggunaan voucher sudah habis.' });
-      }
-
-      const userUsedRes = await client.query(
-        `SELECT 1 FROM user_vouchers WHERE user_id = $1 AND voucher_id = $2`,
-        [req.user.id, voucher.id]
-      );
-      if (userUsedRes.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'Anda sudah pernah menggunakan voucher ini.' });
-      }
-
-      if (totalOriginal < voucher.min_purchase) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ 
-          success: false, 
-          error: `Minimum transaksi untuk voucher ini adalah Rp${voucher.min_purchase.toLocaleString('id-ID')}.` 
-        });
-      }
-
-      if (voucher.discount_type === 'percentage') {
-        discount = Math.floor((totalOriginal * voucher.discount_value) / 100);
-        if (voucher.max_discount !== null && discount > voucher.max_discount) {
-          discount = voucher.max_discount;
+          // Get buyer discount setting
+          const discountSettingRes = await client.query(
+            "SELECT value FROM mitra_settings WHERE key = 'buyer_discount_percent'"
+          );
+          const buyerDiscountPercent = parseInt(discountSettingRes.rows[0]?.value || '10', 10);
+          discount = Math.floor((totalOriginal * buyerDiscountPercent) / 100);
+        } else {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ success: false, error: 'Kode voucher atau referral tidak valid.' });
         }
-      } else if (voucher.discount_type === 'fixed') {
-        discount = voucher.discount_value;
-      }
+      } else {
+        voucher = voucherRes.rows[0];
 
-      discount = Math.min(discount, totalOriginal);
+        if (new Date(voucher.expires_at) < new Date()) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ success: false, error: 'Voucher telah kedaluwarsa.' });
+        }
+
+        if (voucher.usage_limit !== null && voucher.usage_count >= voucher.usage_limit) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ success: false, error: 'Kuota penggunaan voucher sudah habis.' });
+        }
+
+        const userUsedRes = await client.query(
+          `SELECT 1 FROM user_vouchers WHERE user_id = $1 AND voucher_id = $2`,
+          [req.user.id, voucher.id]
+        );
+        if (userUsedRes.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ success: false, error: 'Anda sudah pernah menggunakan voucher ini.' });
+        }
+
+        if (totalOriginal < voucher.min_purchase) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ 
+            success: false, 
+            error: `Minimum transaksi untuk voucher ini adalah Rp${voucher.min_purchase.toLocaleString('id-ID')}.` 
+          });
+        }
+
+        if (voucher.discount_type === 'percentage') {
+          discount = Math.floor((totalOriginal * voucher.discount_value) / 100);
+          if (voucher.max_discount !== null && discount > voucher.max_discount) {
+            discount = voucher.max_discount;
+          }
+        } else if (voucher.discount_type === 'fixed') {
+          discount = voucher.discount_value;
+        }
+
+        discount = Math.min(discount, totalOriginal);
+      }
+    } else if (referralCode) {
+      // Validate referral code if voucher is not used
+      const cleanRef = referralCode.trim().toUpperCase();
+      const mitraRes = await client.query(
+        'SELECT id, name, referral_code, status FROM mitra_users WHERE referral_code = $1',
+        [cleanRef]
+      );
+      if (mitraRes.rows.length > 0) {
+        validMitra = mitraRes.rows[0];
+        appliedRefCode = validMitra.referral_code;
+
+        // Get buyer discount setting
+        const discountSettingRes = await client.query(
+          "SELECT value FROM mitra_settings WHERE key = 'buyer_discount_percent'"
+        );
+        const buyerDiscountPercent = parseInt(discountSettingRes.rows[0]?.value || '10', 10);
+        discount = Math.floor((totalOriginal * buyerDiscountPercent) / 100);
+      }
+    }
+
+    // Also check if referralCode is provided alongside voucher (track referral attribution)
+    if (voucherCode && referralCode && !validMitra) {
+      const cleanRef = referralCode.trim().toUpperCase();
+      const mitraRes = await client.query(
+        'SELECT id, name, referral_code FROM mitra_users WHERE referral_code = $1',
+        [cleanRef]
+      );
+      if (mitraRes.rows.length > 0) {
+        validMitra = mitraRes.rows[0];
+        appliedRefCode = validMitra.referral_code;
+      }
     }
 
     const finalTotal = totalOriginal - discount;
@@ -371,9 +509,9 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
       const orderId = `STB-FREE-${Date.now()}-${uuidv4().slice(0, 8)}`;
 
       const txRes = await client.query(
-        `INSERT INTO payment_transactions (user_id, plan_id, order_id, amount, status, payment_type, voucher_id)
-         VALUES ($1, NULL, $2, 0, 'settlement', 'free_voucher', $3) RETURNING id`,
-        [req.user.id, orderId, voucher ? voucher.id : null]
+        `INSERT INTO payment_transactions (user_id, plan_id, order_id, amount, status, payment_type, voucher_id, referral_code, mitra_id)
+         VALUES ($1, NULL, $2, 0, 'settlement', 'free_voucher', $3, $4, $5) RETURNING id`,
+        [req.user.id, orderId, voucher ? voucher.id : null, appliedRefCode, validMitra ? validMitra.id : null]
       );
       const transactionId = txRes.rows[0].id;
 
@@ -413,10 +551,10 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
 
     if (discount > 0) {
       itemDetails.push({
-        id: `DISC-${voucherCode}`,
+        id: voucherCode ? `DISC-${voucherCode}` : `REF-${appliedRefCode}`,
         price: -discount,
         quantity: 1,
-        name: `Voucher: ${voucherCode}`,
+        name: voucherCode ? `Voucher: ${voucherCode}` : `Diskon Referral: ${appliedRefCode}`,
       });
     }
 
@@ -463,9 +601,9 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
     const { token, redirect_url } = snapTx;
 
     const txRes = await client.query(
-      `INSERT INTO payment_transactions (user_id, plan_id, order_id, amount, status, snap_token, snap_redirect_url, voucher_id)
-       VALUES ($1, NULL, $2, $3, 'pending', $4, $5, $6) RETURNING id`,
-      [req.user.id, orderId, finalTotal, token, redirect_url, voucher ? voucher.id : null]
+      `INSERT INTO payment_transactions (user_id, plan_id, order_id, amount, status, snap_token, snap_redirect_url, voucher_id, referral_code, mitra_id)
+       VALUES ($1, NULL, $2, $3, 'pending', $4, $5, $6, $7, $8) RETURNING id`,
+      [req.user.id, orderId, finalTotal, token, redirect_url, voucher ? voucher.id : null, appliedRefCode, validMitra ? validMitra.id : null]
     );
     const transactionId = txRes.rows[0].id;
 

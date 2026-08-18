@@ -18,14 +18,36 @@ router.get('/', verifyToken, async (req, res, next) => {
     if (result.rows.length > 0) {
       const questionIds = result.rows.map(q => q.id);
       const placeholders = questionIds.map((_, i) => `$${i + 1}`).join(',');
-      
+
+      // Check which questionIds belong to an unsubmitted active tryout session of this user
+      const activeSessionRes = await pool.query(
+        `SELECT DISTINCT ua.question_id
+         FROM user_answers ua
+         JOIN tryout_sessions ts ON ua.session_id = ts.id
+         WHERE ts.user_id = $1 AND ts.submitted_at IS NULL AND ua.question_id = ANY($2::uuid[])`,
+        [req.user.id, questionIds]
+      );
+      const activeQuestionIds = new Set(activeSessionRes.rows.map(r => r.question_id));
+
       const choicesResult = await pool.query(
         `SELECT * FROM answer_choices WHERE question_id IN (${placeholders}) ORDER BY label ASC`,
         questionIds
       );
-      
+
       for (const question of result.rows) {
-        question.choices = choicesResult.rows.filter(c => c.question_id === question.id);
+        const rawChoices = choicesResult.rows.filter(c => c.question_id === question.id);
+        const isActiveExam = activeQuestionIds.has(question.id);
+        question.choices = rawChoices.map(c => {
+          if (isActiveExam) {
+            return {
+              id: c.id,
+              question_id: c.question_id,
+              label: c.label,
+              content: c.content,
+            };
+          }
+          return c;
+        });
       }
     }
     

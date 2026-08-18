@@ -503,7 +503,7 @@ router.get('/questions', verifyToken, async (req, res, next) => {
       const qIds = questionsResult.rows.map(q => q.id);
       const cPlaceholders = qIds.map((_, i) => `$${i + 1}`).join(',');
       const choicesResult = await pool.query(
-        `SELECT * FROM answer_choices WHERE question_id IN (${cPlaceholders}) ORDER BY label ASC`, qIds
+        `SELECT id, question_id, label, content FROM answer_choices WHERE question_id IN (${cPlaceholders}) ORDER BY label ASC`, qIds
       );
       for (const question of questionsResult.rows) {
         question.choices = choicesResult.rows.filter(c => c.question_id === question.id);

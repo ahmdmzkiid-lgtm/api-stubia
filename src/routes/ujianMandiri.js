@@ -108,6 +108,16 @@ router.get("/questions", verifyToken, async (req, res, next) => {
       parent_id,
     });
 
+    const isUserAdmin = await isAdminUser(req.user.id, req.user.role);
+
+    if ((tryout_package_id || parent_type === "tryout_package") && !isUserAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses soal tryout harus melalui sesi tryout resmi.",
+        code: "TRYOUT_SESSION_REQUIRED",
+      });
+    }
+
     let where, params;
     if (tryout_package_id || (parent_type === "tryout_package" && parent_id)) {
       where = "q.tryout_package_id = $1";
@@ -123,11 +133,15 @@ router.get("/questions", verifyToken, async (req, res, next) => {
           error: "Provide tryout_package_id or latihan_id",
         });
     }
+
+    const choiceFields = isUserAdmin
+      ? "'id', ac.id, 'label', ac.label, 'content', ac.content, 'is_correct', ac.is_correct, 'explanation', ac.explanation"
+      : "'id', ac.id, 'label', ac.label, 'content', ac.content";
+
     const result = await pool.query(
       `SELECT q.*,
        COALESCE(json_agg(json_build_object(
-         'id', ac.id, 'label', ac.label, 'content', ac.content,
-         'is_correct', ac.is_correct, 'explanation', ac.explanation
+         ${choiceFields}
        ) ORDER BY ac.label) FILTER (WHERE ac.id IS NOT NULL), '[]') as choices
        FROM um_questions q
        LEFT JOIN um_answer_choices ac ON ac.question_id = q.id

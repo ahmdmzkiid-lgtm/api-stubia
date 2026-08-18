@@ -32,11 +32,19 @@ router.get("/", verifyToken, async (req, res, next) => {
       limit = 100,
     } = req.query;
 
+    const isUserAdmin = await isAdminUser(req.user.id, req.user.role);
+
+    // Siswa tidak boleh mengambil soal tryout lewat endpoint latihan (harus lewat sesi tryout resmi)
+    if (tryout_package_id && !isUserAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: "Akses soal tryout harus melalui sesi tryout resmi.",
+        code: "TRYOUT_SESSION_REQUIRED",
+      });
+    }
+
     // Free plan practice limit check (skip untuk admin, termasuk admin baru dipromosikan)
-    if (
-      !tryout_package_id &&
-      !(await isAdminUser(req.user.id, req.user.role))
-    ) {
+    if (!tryout_package_id && !isUserAdmin) {
       // Check if global UTBK Latihan Soal is active
       const settingsRes = await pool.query("SELECT value FROM site_settings WHERE key = 'latihan_utbk_active'");
       const isLatihanActive = settingsRes.rows.length === 0 || settingsRes.rows[0].value !== 'false';
@@ -193,7 +201,7 @@ router.get("/", verifyToken, async (req, res, next) => {
     if (workflow_status) {
       values.push(workflow_status);
       query += ` AND workflow_status = $${values.length}`;
-    } else if (!(await isAdminUser(req.user.id, req.user.role))) {
+    } else if (!isUserAdmin) {
       // Students only see approved questions
       query += " AND workflow_status = 'approved'";
     }
@@ -209,15 +217,16 @@ router.get("/", verifyToken, async (req, res, next) => {
       (page - 1) * limit,
     ]);
 
-    // Fetch choices for these questions
+    // Fetch choices for these questions (hanya sertakan is_correct & explanation jika staf/admin)
     if (questionsResult.rows.length > 0) {
       const questionIds = questionsResult.rows.map((q) => q.id);
       const placeholders = questionIds.map((_, i) => `$${i + 1}`).join(",");
 
-      const choicesResult = await pool.query(
-        `SELECT * FROM answer_choices WHERE question_id IN (${placeholders}) ORDER BY label ASC`,
-        questionIds,
-      );
+      const choicesQuery = isUserAdmin
+        ? `SELECT * FROM answer_choices WHERE question_id IN (${placeholders}) ORDER BY label ASC`
+        : `SELECT id, question_id, label, content FROM answer_choices WHERE question_id IN (${placeholders}) ORDER BY label ASC`;
+
+      const choicesResult = await pool.query(choicesQuery, questionIds);
 
       // Map choices to questions
       for (const question of questionsResult.rows) {
