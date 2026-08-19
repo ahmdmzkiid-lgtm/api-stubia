@@ -116,6 +116,7 @@ const certificatesRoutes = require('./routes/certificates');
 const fellowshipRoutes = require('./routes/fellowship');
 const skdCpnsRoutes = require('./routes/skdCpns');
 const tkaRoutes = require('./routes/tka');
+const fundamentalRoutes = require('./routes/fundamental');
 
 // Mount routes
 app.use('/sitemap.xml', sitemapRoutes);
@@ -143,6 +144,7 @@ app.use('/api/certificates', certificatesRoutes);
 app.use('/api/fellowship', fellowshipRoutes);
 app.use('/api/skd', skdCpnsRoutes);
 app.use('/api/tka', tkaRoutes);
+app.use('/api/fundamental', fundamentalRoutes);
 
 // Global Error Handler
 app.use((err, req, res, next) => {

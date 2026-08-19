@@ -9,7 +9,7 @@ const midtrans = require('../services/midtransService');
 router.get('/plans', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, display_name, description, price, duration_days, features, is_popular, sort_order, plan_type, target_type, quota_limit
+      `SELECT id, name, display_name, description, price, original_price, discount_percent, duration_days, features, is_popular, sort_order, plan_type, target_type, quota_limit
        FROM plans WHERE is_active = true ORDER BY sort_order`
     );
     res.json({ success: true, data: rows });
@@ -91,25 +91,43 @@ router.post('/subscribe', verifyToken, async (req, res, next) => {
       return res.json({ success: true, message: 'Paket Gratis diaktifkan', data: { plan: plan.name } });
     }
 
-    // Paid plan → create Midtrans transaction
+    // Paid plan → create Midtrans transaction with PPN 11%
+    const taxAmount = Math.round(plan.price * 0.11);
+    const finalAmount = plan.price + taxAmount;
     const orderId = `STB-${Date.now()}-${uuidv4().slice(0, 8)}`;
 
     // Get user info
     const userResult = await pool.query('SELECT id, name, email FROM users WHERE id = $1', [req.user.id]);
     const user = userResult.rows[0];
 
+    const itemDetails = [
+      {
+        id: plan.id,
+        price: plan.price,
+        quantity: 1,
+        name: plan.display_name.slice(0, 50),
+      },
+      {
+        id: 'TAX-PPN11',
+        price: taxAmount,
+        quantity: 1,
+        name: 'PPN 11%',
+      }
+    ];
+
     const { token, redirect_url } = await midtrans.createTransaction({
       orderId,
-      grossAmount: plan.price,
+      grossAmount: finalAmount,
       planName: plan.display_name,
       user,
+      itemDetails,
     });
 
     // Store pending transaction
     await pool.query(
       `INSERT INTO payment_transactions (user_id, plan_id, order_id, amount, status, snap_token, snap_redirect_url)
        VALUES ($1, $2, $3, $4, 'pending', $5, $6)`,
-      [req.user.id, plan.id, orderId, plan.price, token, redirect_url]
+      [req.user.id, plan.id, orderId, finalAmount, token, redirect_url]
     );
 
     res.json({
@@ -127,9 +145,10 @@ router.post('/subscribe', verifyToken, async (req, res, next) => {
 
 const planPriority = {
   'premium': 80,
-  'utbk_12m': 77, 'utbk_9m': 76, 'utbk_6m': 75, 'utbk_3m': 74,
+  'utbk_12m': 77, 'utbk_9m': 76, 'utbk_6m': 75, 'utbk_3m': 74, 'utbk_1m': 73,
   'premium_um': 60, 'um_to_all': 55, 'um_to_3x': 35,
   'cpns_6m': 50, 'cpns_3m': 48,
+  'tka_premium_sma': 45, 'tka_premium_smp': 43, 'tka_premium_sd': 40,
   'gratis': 1
 };
 
@@ -500,7 +519,10 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
       }
     }
 
-    const finalTotal = totalOriginal - discount;
+    const subtotalAfterDiscount = Math.max(0, totalOriginal - discount);
+    const taxAmount = subtotalAfterDiscount > 0 ? Math.round(subtotalAfterDiscount * 0.11) : 0;
+    const finalTotal = subtotalAfterDiscount + taxAmount;
+
     const userRes = await client.query('SELECT id, name, email FROM users WHERE id = $1', [req.user.id]);
     const user = userRes.rows[0];
 
@@ -555,6 +577,15 @@ router.post('/checkout', verifyToken, async (req, res, next) => {
         price: -discount,
         quantity: 1,
         name: voucherCode ? `Voucher: ${voucherCode}` : `Diskon Referral: ${appliedRefCode}`,
+      });
+    }
+
+    if (taxAmount > 0) {
+      itemDetails.push({
+        id: 'TAX-PPN11',
+        price: taxAmount,
+        quantity: 1,
+        name: 'PPN 11%',
       });
     }
 
@@ -747,7 +778,7 @@ router.post('/confirm', verifyToken, async (req, res, next) => {
     }
 
     try {
-      const statusResponse = await midtrans.verifyNotification({ order_id, transaction_status: 'capture' });
+      const statusResponse = await midtrans.getTransactionStatus(order_id);
       const finalStatus = statusResponse.transaction_status === 'capture'
         ? (statusResponse.fraud_status === 'accept' ? 'settlement' : 'deny')
         : statusResponse.transaction_status;

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const { verifyToken, verifyAdmin } = require('../middleware/auth');
+const { pinLimiter } = require('../middleware/rateLimiter');
 
 // Sensitive keys that should not be exposed publicly
 const SENSITIVE_KEYS = ['admin_pin'];
@@ -35,7 +36,7 @@ router.get('/admin', verifyToken, verifyAdmin, async (req, res, next) => {
 });
 
 // POST /api/settings/verify-pin - Admin only: verify CMS admin PIN
-router.post('/verify-pin', verifyToken, verifyAdmin, async (req, res, next) => {
+router.post('/verify-pin', verifyToken, verifyAdmin, pinLimiter, async (req, res, next) => {
   try {
     const { pin } = req.body;
     if (!pin) {

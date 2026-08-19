@@ -54,9 +54,22 @@ const chatLimiter = rateLimit({
   },
 });
 
+// Rate limiter for Admin PIN verification (prevent brute-force)
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 attempts per 15 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Terlalu banyak percobaan PIN Admin yang salah. Silakan coba lagi dalam 15 menit.',
+  },
+});
+
 module.exports = {
   authLimiter,
   voucherLimiter,
   publicUploadLimiter,
   chatLimiter,
+  pinLimiter,
 };

@@ -140,6 +140,21 @@ async function hasActiveTkaSubscription(userId, level = 'SMA') {
   return res.rows.length > 0;
 }
 
+async function hasActiveFundamentalUtbkSubscription(userId) {
+  const res = await pool.query(
+    `SELECT 1 FROM subscriptions s
+     JOIN plans p ON p.id = s.plan_id
+     WHERE s.user_id = $1 
+       AND s.status = 'active' 
+       AND s.expires_at > NOW()
+       AND p.name IN ('utbk_3m', 'utbk_6m', 'utbk_9m', 'utbk_12m', 'premium')
+       AND (p.plan_type = 'subscription' OR p.plan_type = 'access')
+     LIMIT 1`,
+    [userId],
+  );
+  return res.rows.length > 0;
+}
+
 module.exports = {
   SOCIAL_VERIFY_MSG,
   isAdminUser,
@@ -148,6 +163,7 @@ module.exports = {
   assertUtbkGratisContentAccess,
   assertUmGratisContentAccess,
   hasActiveUtbkSubscription,
+  hasActiveFundamentalUtbkSubscription,
   hasActiveUmSubscription,
   hasActiveTkaSubscription,
 };

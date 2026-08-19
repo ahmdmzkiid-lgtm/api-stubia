@@ -62,6 +62,16 @@ async function verifyNotification(notification) {
 }
 
 /**
+ * Query status directly from Midtrans by orderId
+ * @param {string} orderId
+ * @returns {Promise<Object>}
+ */
+async function getTransactionStatus(orderId) {
+  const statusResponse = await snap.transaction.status(orderId);
+  return statusResponse;
+}
+
+/**
  * Get Midtrans client key for frontend
  */
 function getClientKey() {
@@ -71,5 +81,6 @@ function getClientKey() {
 module.exports = {
   createTransaction,
   verifyNotification,
+  getTransactionStatus,
   getClientKey,
 };

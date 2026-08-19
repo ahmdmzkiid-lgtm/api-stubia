@@ -3131,8 +3131,14 @@ router.get("/leaderboard/:packageId", verifyToken, async (req, res, next) => {
           MAX(ts.total_score)
         ) as total_score,
         MAX(ts.submitted_at) as submitted_at,
-        (SELECT ts_t.target_ptn FROM tryout_sessions ts_t WHERE ts_t.user_id = ts.user_id AND ts_t.package_id = $1 AND ts_t.target_ptn IS NOT NULL ORDER BY ts_t.started_at DESC LIMIT 1) as target_ptn,
-        (SELECT ts_t.target_major FROM tryout_sessions ts_t WHERE ts_t.user_id = ts.user_id AND ts_t.package_id = $1 AND ts_t.target_major IS NOT NULL ORDER BY ts_t.started_at DESC LIMIT 1) as target_major
+        COALESCE(
+          (SELECT ts_t.target_ptn FROM tryout_sessions ts_t WHERE ts_t.user_id = ts.user_id AND ts_t.package_id = $1 AND ts_t.target_ptn IS NOT NULL ORDER BY ts_t.started_at DESC LIMIT 1),
+          (SELECT ts_any.target_ptn FROM tryout_sessions ts_any WHERE ts_any.user_id = ts.user_id AND ts_any.target_ptn IS NOT NULL ORDER BY ts_any.started_at DESC LIMIT 1)
+        ) as target_ptn,
+        COALESCE(
+          (SELECT ts_t.target_major FROM tryout_sessions ts_t WHERE ts_t.user_id = ts.user_id AND ts_t.package_id = $1 AND ts_t.target_major IS NOT NULL ORDER BY ts_t.started_at DESC LIMIT 1),
+          (SELECT ts_any.target_major FROM tryout_sessions ts_any WHERE ts_any.user_id = ts.user_id AND ts_any.target_major IS NOT NULL ORDER BY ts_any.started_at DESC LIMIT 1)
+        ) as target_major
       FROM tryout_sessions ts
       JOIN users u ON u.id = ts.user_id
       WHERE ts.package_id = $1
