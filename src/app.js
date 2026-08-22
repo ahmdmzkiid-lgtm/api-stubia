@@ -18,9 +18,12 @@ const allowedOrigins = [
   'https://www.stubia.id',
   'https://app.stubia.id',
   'https://admin.stubia.id',
+  'https://mitra.stubia.id',
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
+  'http://localhost:5176',
+  'http://localhost:5177',
   'http://localhost:8080',
   'http://localhost:3000'
 ];
@@ -117,6 +120,7 @@ const fellowshipRoutes = require('./routes/fellowship');
 const skdCpnsRoutes = require('./routes/skdCpns');
 const tkaRoutes = require('./routes/tka');
 const fundamentalRoutes = require('./routes/fundamental');
+const mitraRoutes = require('./routes/mitra');
 
 // Mount routes
 app.use('/sitemap.xml', sitemapRoutes);
@@ -145,6 +149,7 @@ app.use('/api/fellowship', fellowshipRoutes);
 app.use('/api/skd', skdCpnsRoutes);
 app.use('/api/tka', tkaRoutes);
 app.use('/api/fundamental', fundamentalRoutes);
+app.use('/api/mitra', mitraRoutes);
 
 // Global Error Handler
 app.use((err, req, res, next) => {

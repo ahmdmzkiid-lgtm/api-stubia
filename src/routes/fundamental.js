@@ -1353,7 +1353,7 @@ router.delete('/admin/quizzes/:id', [verifyToken, verifyAdmin], async (req, res,
     const { id } = req.params;
     const result = await pool.query('DELETE FROM fundamental_quizzes WHERE id = $1 RETURNING *', [id]);
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Soal kuis tidak ditemukan' });
+      return res.status(404).json({ error: 'Soal kuis tidak ditemukan atau sudah dihapus' });
     }
 
     logAdminActivity(req, 'DELETE', 'FUNDAMENTAL_QUIZ', `Quiz ID: ${id}`, `Menghapus soal kuis fundamental`);
@@ -1407,6 +1407,11 @@ router.post('/admin/quizzes/import', [verifyToken, verifyAdmin, upload.single('f
     }
     if (!req.file) {
       return res.status(400).json({ error: 'File Excel (.xlsx) wajib diunggah' });
+    }
+
+    const matCheck = await pool.query('SELECT id FROM fundamental_materials WHERE id = $1', [material_id]);
+    if (matCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Materi tujuan tidak ditemukan' });
     }
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -1735,6 +1740,11 @@ router.post('/admin/drillings/import', [verifyToken, verifyAdmin, upload.single(
     }
     if (!req.file) {
       return res.status(400).json({ error: 'File Excel (.xlsx) wajib diunggah' });
+    }
+
+    const subCheck = await pool.query('SELECT id FROM subjects WHERE id = $1', [subject_id]);
+    if (subCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Subtes tujuan tidak ditemukan' });
     }
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
