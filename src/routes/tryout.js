@@ -204,13 +204,14 @@ async function autoSubmitExpiredSessionsForUser(dbOrPool, userId) {
     const activeUtbkRes = await dbOrPool.query(
       `SELECT 1 FROM subscriptions s
        JOIN plans p ON p.id = s.plan_id
-       WHERE s.user_id = $1 AND s.status = 'active' AND s.expires_at > NOW()
-         AND (p.target_type = 'utbk' OR p.target_type = 'all') AND (p.plan_type = 'subscription' OR p.plan_type = 'access')
+       WHERE s.user_id = $1 AND s.status = 'active' AND (s.expires_at IS NULL OR s.expires_at > NOW())
+         AND (p.target_type = 'utbk' OR p.target_type = 'all')
+         AND (p.plan_type = 'subscription' OR p.plan_type = 'access' OR (p.plan_type = 'quota' AND s.quota_remaining > 0))
        LIMIT 1`,
       [userId]
     );
     if (activeUtbkRes.rows.length > 0) {
-      return; // Premium user: dates don't expire for them
+      return; // Premium or quota user: dates don't expire for them
     }
 
     const expiredRes = await dbOrPool.query(
@@ -1528,8 +1529,9 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
         const activeUtbkRes = await pool.query(
           `SELECT 1 FROM subscriptions s
            JOIN plans p ON p.id = s.plan_id
-           WHERE s.user_id = $1 AND s.status = 'active' AND s.expires_at > NOW()
-             AND (p.target_type = 'utbk' OR p.target_type = 'all') AND (p.plan_type = 'subscription' OR p.plan_type = 'access')
+           WHERE s.user_id = $1 AND s.status = 'active' AND (s.expires_at IS NULL OR s.expires_at > NOW())
+             AND (p.target_type = 'utbk' OR p.target_type = 'all')
+             AND (p.plan_type = 'subscription' OR p.plan_type = 'access' OR (p.plan_type = 'quota' AND s.quota_remaining > 0))
            LIMIT 1`,
           [req.user.id]
         );
