@@ -181,7 +181,9 @@ router.post("/tryout/start", verifyToken, async (req, res, next) => {
     );
     if (requiredPlan !== "gratis" && quotaPlan) {
       await client.query(
-        `UPDATE subscriptions SET quota_remaining = quota_remaining - 1
+        `UPDATE subscriptions 
+         SET quota_remaining = GREATEST(0, quota_remaining - 1),
+             status = CASE WHEN quota_remaining - 1 <= 0 THEN 'expired' ELSE status END
          WHERE user_id = $1 AND plan_id = (SELECT id FROM plans WHERE name = $2 LIMIT 1)`,
         [userId, quotaPlan.name]
       );

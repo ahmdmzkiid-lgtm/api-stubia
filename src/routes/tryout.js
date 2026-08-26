@@ -1035,11 +1035,14 @@ router.post("/start", verifyToken, async (req, res, next) => {
             // Deduct 1 tryout quota credit on the FIRST subtest of a package attempt
             const quota = quotaRes.rows[0];
             const updateQuotaRes = await client.query(
-              `UPDATE subscriptions SET quota_remaining = quota_remaining - 1 WHERE id = $1 RETURNING quota_remaining`,
+              `UPDATE subscriptions 
+               SET quota_remaining = GREATEST(0, quota_remaining - 1),
+                   status = CASE WHEN quota_remaining - 1 <= 0 THEN 'expired' ELSE status END
+               WHERE id = $1 RETURNING quota_remaining`,
               [quota.id],
             );
             quotaDeducted = true;
-            newQuotaRemaining = updateQuotaRes.rows[0]?.quota_remaining ?? (quota.quota_remaining - 1);
+            newQuotaRemaining = updateQuotaRes.rows[0]?.quota_remaining ?? 0;
           } else {
             // Free user flow: Auto submit any expired sessions for free user first
             await autoSubmitExpiredSessionsForUser(client, req.user.id);

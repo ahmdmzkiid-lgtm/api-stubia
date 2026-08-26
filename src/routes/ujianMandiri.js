@@ -1193,7 +1193,10 @@ router.post("/tryout/start", verifyToken, async (req, res, next) => {
           // Deduct 1 tryout quota credit
           const quota = quotaRes.rows[0];
           await client.query(
-            `UPDATE subscriptions SET quota_remaining = quota_remaining - 1 WHERE id = $1`,
+            `UPDATE subscriptions 
+             SET quota_remaining = GREATEST(0, quota_remaining - 1),
+                 status = CASE WHEN quota_remaining - 1 <= 0 THEN 'expired' ELSE status END
+             WHERE id = $1`,
             [quota.id],
           );
         } else {

@@ -45,6 +45,7 @@ router.get('/active-plans', verifyToken, async (req, res, next) => {
        FROM subscriptions s
        JOIN plans p ON p.id = s.plan_id
        WHERE s.user_id = $1 AND s.status = 'active' AND s.expires_at > NOW()
+         AND (p.plan_type != 'quota' OR (p.plan_type = 'quota' AND COALESCE(s.quota_remaining, 0) > 0))
        ORDER BY s.expires_at DESC`,
       [req.user.id]
     );
