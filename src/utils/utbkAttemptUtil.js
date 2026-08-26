@@ -1,5 +1,21 @@
 // Utility to calculate UTBK tryout package attempts and enforce 2x max limit
 async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
+  const pkgRes = await dbOrPool.query(
+    "SELECT subject_config FROM tryout_packages WHERE id = $1",
+    [packageId]
+  );
+  let totalExpectedSubtests = 7;
+  if (pkgRes.rows.length > 0 && pkgRes.rows[0].subject_config) {
+    try {
+      const cfg = typeof pkgRes.rows[0].subject_config === "string" 
+        ? JSON.parse(pkgRes.rows[0].subject_config) 
+        : pkgRes.rows[0].subject_config;
+      if (Array.isArray(cfg) && cfg.length > 0) {
+        totalExpectedSubtests = cfg.length;
+      }
+    } catch {}
+  }
+
   const sessionsRes = await dbOrPool.query(
     `SELECT ts.id, ts.started_at, ts.submitted_at,
        (
@@ -21,7 +37,8 @@ async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
       attemptsUsed: 0,
       completedAttempts: 0,
       maxAttempts: 2,
-      canAttempt: true
+      canAttempt: true,
+      latestGroup: null
     };
   }
 
@@ -41,7 +58,7 @@ async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
       currentGroup = {
         subtestSet: new Set(),
         latestStartedAt: row.started_at,
-        isCompleted: true,
+        allSubmitted: true,
         sessionIds: [],
       };
       groups.push(currentGroup);
@@ -50,8 +67,12 @@ async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
     currentGroup.subtestSet.add(subtest);
     currentGroup.sessionIds.push(row.id);
     if (!row.submitted_at) {
-      currentGroup.isCompleted = false;
+      currentGroup.allSubmitted = false;
     }
+  });
+
+  groups.forEach(g => {
+    g.isCompleted = g.allSubmitted && g.subtestSet.size >= totalExpectedSubtests;
   });
 
   const completedAttempts = groups.filter(g => g.isCompleted).length;
@@ -63,7 +84,8 @@ async function getUtbkPackageAttemptInfo(dbOrPool, userId, packageId) {
     attemptsUsed,
     completedAttempts,
     maxAttempts: 2,
-    canAttempt
+    canAttempt,
+    latestGroup: currentGroup
   };
 }
 

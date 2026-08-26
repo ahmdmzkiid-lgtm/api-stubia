@@ -5,7 +5,7 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node --watch src/app.js",
+    "dev": "node --watch-path=src src/app.js",
     "seed": "node seeds/seed_soal.js",
     "migrate": "node src/config/migrate.js"
   },

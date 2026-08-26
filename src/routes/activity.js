@@ -355,6 +355,7 @@ router.get("/riwayat", verifyToken, async (req, res, next) => {
         ts.package_id,
         tp.title as name,
         tp.subject_config,
+        tp.score_released_at,
         ts.started_at,
         ts.submitted_at,
         ts.total_score as score,
@@ -674,29 +675,20 @@ router.get("/riwayat", verifyToken, async (req, res, next) => {
         .map((b) => b.mastery)
         .filter((m) => typeof m === "number");
 
+      const firstSession = group.sessions[0];
+      const isScoreReleased = req.user?.role === 'admin' || (firstSession?.score_released_at !== null && firstSession?.score_released_at !== undefined && new Date(firstSession.score_released_at) <= new Date());
+
       return {
         id: group.sessions[0].id, // use first session id as representative
         sessionIds: group.sessions.map((s) => s.id),
         packageId: group.package_id,
         type: "tryout",
         name: group.name,
-        score: aggregatedScore,
-        theta:
-          thetas.length > 0
-            ? thetas.reduce((a, b) => a + b, 0) / thetas.length
-            : 0,
-        percentile:
-          percentiles.length > 0
-            ? Math.round(
-                percentiles.reduce((a, b) => a + b, 0) / percentiles.length,
-              )
-            : 0,
-        mastery:
-          masteries.length > 0
-            ? Math.round(
-                masteries.reduce((a, b) => a + b, 0) / masteries.length,
-              )
-            : 0,
+        score: isScoreReleased ? aggregatedScore : null,
+        score_visible: isScoreReleased,
+        theta: isScoreReleased ? (thetas.length > 0 ? thetas.reduce((a, b) => a + b, 0) / thetas.length : 0) : null,
+        percentile: isScoreReleased ? (percentiles.length > 0 ? Math.round(percentiles.reduce((a, b) => a + b, 0) / percentiles.length) : 0) : null,
+        mastery: masteries.length > 0 ? Math.round(masteries.reduce((a, b) => a + b, 0) / masteries.length) : 0,
         subtestCount: group.sessions.length,
         totalSubtests: totalSubtests,
         isCompleted: isCompleted,

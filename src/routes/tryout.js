@@ -355,6 +355,7 @@ router.get(
 // Ensure end_date and required_plan column defaults on tryout_packages
 pool.query("ALTER TABLE tryout_packages ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ;").catch(() => {});
 pool.query("ALTER TABLE tryout_packages ALTER COLUMN required_plan SET DEFAULT 'premium'; UPDATE tryout_packages SET required_plan = 'premium' WHERE required_plan = 'gratis' OR required_plan IS NULL;").catch(() => {});
+pool.query("ALTER TABLE tryout_packages ADD COLUMN IF NOT EXISTS score_released_at TIMESTAMPTZ;").catch(() => {});
 
 // Create package
 router.post("/packages", [verifyToken, verifyAdmin], async (req, res, next) => {
@@ -470,6 +471,34 @@ router.patch(
       next(error);
     }
   },
+);
+
+// Toggle score visibility for students
+router.patch(
+  "/packages/:id/release-score",
+  [verifyToken, verifyAdmin],
+  async (req, res, next) => {
+    const { id } = req.params;
+    const { release } = req.body; // true = buka skor, false = tutup skor
+    try {
+      const pkgCheck = await pool.query("SELECT title FROM tryout_packages WHERE id = $1", [id]);
+      if (pkgCheck.rows.length === 0) {
+        return res.status(404).json({ success: false, error: "Package not found" });
+      }
+      const value = release ? new Date().toISOString() : null;
+      const result = await pool.query(
+        "UPDATE tryout_packages SET score_released_at = $1 WHERE id = $2 RETURNING *",
+        [value, id]
+      );
+      logAdminActivity(
+        req, 'UPDATE', 'SKOR_TRYOUT', pkgCheck.rows[0].title,
+        `${release ? 'Membuka' : 'Menutup'} visibilitas skor tryout: ${pkgCheck.rows[0].title}`
+      );
+      res.json({ success: true, data: result.rows[0], score_released_at: value });
+    } catch (error) {
+      next(error);
+    }
+  }
 );
 
 // Delete package
@@ -725,32 +754,33 @@ router.get(
           isCompleted = true;
         }
 
-        // Hydrate active attempt's subtests for multi-device/cache persistence
-        const activeAttemptSessions = await pool.query(
-          `SELECT ts.id, ts.submitted_at,
-             (SELECT s.name FROM user_answers ua
-              JOIN questions q ON ua.question_id = q.id
-              LEFT JOIN subjects s ON q.subject_id = s.id
-              WHERE ua.session_id = ts.id AND s.name IS NOT NULL
-              GROUP BY s.name ORDER BY COUNT(*) DESC LIMIT 1) as subtest_name,
-             (SELECT COUNT(*) FROM user_answers ua2
-              WHERE ua2.session_id = ts.id AND (ua2.chosen_choice_id IS NOT NULL OR (ua2.answer_text IS NOT NULL AND ua2.answer_text != ''))) as answered_count
-           FROM tryout_sessions ts
-           WHERE ts.user_id = $1 AND ts.package_id = $2
-             AND ts.started_at >= NOW() - INTERVAL '24 hours'
-           ORDER BY ts.started_at ASC`,
-          [req.user.id, packageId]
-        );
+        // Only hydrate active (uncompleted) attempt's subtests for multi-device/cache persistence
+        if (attemptInfo.latestGroup && !attemptInfo.latestGroup.isCompleted && attemptInfo.latestGroup.sessionIds.length > 0) {
+          const activeAttemptSessions = await pool.query(
+            `SELECT ts.id, ts.submitted_at,
+               (SELECT s.name FROM user_answers ua
+                JOIN questions q ON ua.question_id = q.id
+                LEFT JOIN subjects s ON q.subject_id = s.id
+                WHERE ua.session_id = ts.id AND s.name IS NOT NULL
+                GROUP BY s.name ORDER BY COUNT(*) DESC LIMIT 1) as subtest_name,
+               (SELECT COUNT(*) FROM user_answers ua2
+                WHERE ua2.session_id = ts.id AND (ua2.chosen_choice_id IS NOT NULL OR (ua2.answer_text IS NOT NULL AND ua2.answer_text != ''))) as answered_count
+             FROM tryout_sessions ts
+             WHERE ts.id = ANY($1)
+             ORDER BY ts.started_at ASC`,
+            [attemptInfo.latestGroup.sessionIds]
+          );
 
-        activeAttemptSessions.rows.forEach(r => {
-          if (r.subtest_name) {
-            activeSessions[r.subtest_name] = r.id;
-            answeredCounts[r.subtest_name] = parseInt(r.answered_count || 0, 10);
-            if (r.submitted_at) {
-              completedSubtests.push(r.subtest_name);
+          activeAttemptSessions.rows.forEach(r => {
+            if (r.subtest_name) {
+              activeSessions[r.subtest_name] = r.id;
+              answeredCounts[r.subtest_name] = parseInt(r.answered_count || 0, 10);
+              if (r.submitted_at) {
+                completedSubtests.push(r.subtest_name);
+              }
             }
-          }
-        });
+          });
+        }
       }
 
       const responsePayload = {
@@ -952,54 +982,55 @@ router.post("/start", verifyToken, async (req, res, next) => {
       const hasUtbkUnlimited = activeUtbkRes.rows.length > 0;
 
       if (!hasUtbkUnlimited) {
-        // Check if user has active tryout quota for UTBK (eceran / retail packages: 5x, 8x, 10x, etc.)
-        const quotaRes = await client.query(
-          `SELECT s.id, s.quota_remaining FROM subscriptions s
-           JOIN plans p ON p.id = s.plan_id
-           WHERE s.user_id = $1 AND s.status = 'active' AND (s.expires_at IS NULL OR s.expires_at > NOW())
-             AND p.plan_type = 'quota' AND (p.target_type = 'utbk' OR p.target_type = 'all') AND s.quota_remaining > 0
-           ORDER BY s.expires_at ASC NULLS LAST LIMIT 1`,
-          [req.user.id],
-        );
+        // First check if user is continuing an ongoing attempt (subtest 2+)
+        // Or has active tryout quota for UTBK (eceran / retail packages: 5x, 8x, 10x, etc.)
+        let isOngoingAttempt = false;
+        if (is_first_subtest === false) {
+          isOngoingAttempt = true;
+        } else {
+          // Check if there is an active session started in the current attempt window (< 24h since last completed or within last 24h)
+          const lastCompletionRes = await client.query(
+            `SELECT MAX(completed_at) as last_completed
+             FROM tryout_package_completions
+             WHERE user_id = $1 AND package_id = $2 AND package_type = 'utbk'`,
+            [req.user.id, package_id],
+          );
+          const lastCompleted = lastCompletionRes.rows[0]?.last_completed;
 
-        if (quotaRes.rows.length > 0) {
-          let shouldDeduct = false;
-
-          if (is_first_subtest === true) {
-            shouldDeduct = true;
-          } else if (is_first_subtest === false) {
-            shouldDeduct = false;
+          let existingAttemptSessions;
+          if (lastCompleted) {
+            existingAttemptSessions = await client.query(
+              `SELECT 1 FROM tryout_sessions
+               WHERE user_id = $1 AND package_id = $2 AND started_at > $3 LIMIT 1`,
+              [req.user.id, package_id, lastCompleted],
+            );
           } else {
-            // 1. Get the latest completion timestamp for this user & package (if any)
-            const lastCompletionRes = await client.query(
-              `SELECT MAX(completed_at) as last_completed
-               FROM tryout_package_completions
-               WHERE user_id = $1 AND package_id = $2 AND package_type = 'utbk'`,
+            existingAttemptSessions = await client.query(
+              `SELECT 1 FROM tryout_sessions
+               WHERE user_id = $1 AND package_id = $2 AND started_at > NOW() - INTERVAL '24 hours' LIMIT 1`,
               [req.user.id, package_id],
             );
-            const lastCompleted = lastCompletionRes.rows[0]?.last_completed;
-
-            // 2. Check if this attempt has already started any subtest
-            let existingAttemptSessions;
-            if (lastCompleted) {
-              existingAttemptSessions = await client.query(
-                `SELECT 1 FROM tryout_sessions
-                 WHERE user_id = $1 AND package_id = $2 AND started_at > $3 LIMIT 1`,
-                [req.user.id, package_id, lastCompleted],
-              );
-            } else {
-              existingAttemptSessions = await client.query(
-                `SELECT 1 FROM tryout_sessions
-                 WHERE user_id = $1 AND package_id = $2 AND started_at > NOW() - INTERVAL '24 hours' LIMIT 1`,
-                [req.user.id, package_id],
-              );
-            }
-
-            shouldDeduct = existingAttemptSessions.rows.length === 0;
           }
+          isOngoingAttempt = existingAttemptSessions.rows.length > 0;
+        }
 
-          if (shouldDeduct) {
-            // Deduct 1 tryout quota credit ONLY on the FIRST subtest of a package attempt
+        if (isOngoingAttempt) {
+          // User is continuing subtest 2+ of an active attempt that was already authorized/deducted on subtest 1.
+          // Allow session creation without requiring remaining quota or free registration checks.
+          shouldDeduct = false;
+        } else {
+          // New attempt starting (first subtest)
+          const quotaRes = await client.query(
+            `SELECT s.id, s.quota_remaining FROM subscriptions s
+             JOIN plans p ON p.id = s.plan_id
+             WHERE s.user_id = $1 AND s.status = 'active' AND (s.expires_at IS NULL OR s.expires_at > NOW())
+               AND p.plan_type = 'quota' AND (p.target_type = 'utbk' OR p.target_type = 'all') AND s.quota_remaining > 0
+             ORDER BY s.expires_at ASC NULLS LAST LIMIT 1`,
+            [req.user.id],
+          );
+
+          if (quotaRes.rows.length > 0) {
+            // Deduct 1 tryout quota credit on the FIRST subtest of a package attempt
             const quota = quotaRes.rows[0];
             const updateQuotaRes = await client.query(
               `UPDATE subscriptions SET quota_remaining = quota_remaining - 1 WHERE id = $1 RETURNING quota_remaining`,
@@ -1007,77 +1038,81 @@ router.post("/start", verifyToken, async (req, res, next) => {
             );
             quotaDeducted = true;
             newQuotaRemaining = updateQuotaRes.rows[0]?.quota_remaining ?? (quota.quota_remaining - 1);
-          }
-        } else {
-          // Free user flow: Auto submit any expired sessions for free user first
-          await autoSubmitExpiredSessionsForUser(client, req.user.id);
+          } else {
+            // Free user flow: Auto submit any expired sessions for free user first
+            await autoSubmitExpiredSessionsForUser(client, req.user.id);
 
-          // Check start date (scheduled_at) and end date (end_date) window for Free users
-          const pkgDateCheck = await client.query(
-            "SELECT scheduled_at, end_date, required_plan FROM tryout_packages WHERE id = $1",
-            [package_id]
-          );
-          if (pkgDateCheck.rows.length > 0) {
-            const { scheduled_at, end_date, required_plan } = pkgDateCheck.rows[0];
-            const now = new Date();
-            const startDate = parseLocalDate(scheduled_at);
-            const endDate = parseLocalDate(end_date);
+            // Check start date (scheduled_at) and end date (end_date) window for Free users
+            const pkgDateCheck = await client.query(
+              "SELECT scheduled_at, end_date, required_plan FROM tryout_packages WHERE id = $1",
+              [package_id]
+            );
+            if (pkgDateCheck.rows.length > 0) {
+              const { scheduled_at, end_date, required_plan } = pkgDateCheck.rows[0];
+              const now = new Date();
+              const startDate = parseLocalDate(scheduled_at);
+              const endDate = parseLocalDate(end_date);
 
-            let isFreeNow = false;
-            if (startDate && endDate) {
-              isFreeNow = now >= startDate && now <= endDate;
-            } else if (required_plan === 'gratis') {
-              isFreeNow = true;
-            }
+              let isFreeNow = false;
+              if (startDate) {
+                if (endDate) {
+                  isFreeNow = now >= startDate && now <= endDate;
+                } else {
+                  isFreeNow = now >= startDate;
+                }
+              } else if (required_plan === 'gratis') {
+                isFreeNow = true;
+              }
 
-            if (!isFreeNow) {
-              await client.query("ROLLBACK");
-              if (startDate && now < startDate) {
+              if (!isFreeNow) {
+                await client.query("ROLLBACK");
+                if (startDate && now < startDate) {
+                  return res.status(403).json({
+                    success: false,
+                    error: "Tryout ini belum dibuka sebagai tryout gratis. Upgrade ke Premium untuk akses kapan saja.",
+                    code: "NOT_STARTED",
+                  });
+                }
                 return res.status(403).json({
                   success: false,
-                  error: "Tryout ini belum dibuka sebagai tryout gratis. Upgrade ke Premium untuk akses kapan saja.",
-                  code: "NOT_STARTED",
+                  error: "Tenggat waktu tryout gratis telah berakhir dan kembali berstatus Premium. Upgrade ke Premium untuk akses penuh.",
+                  code: "EXPIRED",
                 });
               }
+            }
+
+            // Check if this specific package has already been completed (one attempt per package for free users)
+            let packageDone = await isPackageCompleted(
+              client,
+              req.user.id,
+              "utbk",
+              package_id,
+            );
+
+            if (packageDone) {
+              await client.query("ROLLBACK");
               return res.status(403).json({
                 success: false,
-                error: "Tenggat waktu tryout gratis telah berakhir dan kembali berstatus Premium. Upgrade ke Premium untuk akses penuh.",
-                code: "EXPIRED",
+                error:
+                  "Akun gratis hanya dapat mengerjakan setiap paket tryout sebanyak 1 kali. Upgrade ke Premium untuk akses tanpa batas.",
+                code: "FREE_LIMIT_REACHED",
               });
             }
-          }
 
-          // Check if this specific package has already been completed (one attempt per package for free users)
-          let packageDone = await isPackageCompleted(
-            client,
-            req.user.id,
-            "utbk",
-            package_id,
-          );
+            // Check if registration exists and is approved for this package
+            const regRes = await client.query(
+              "SELECT status FROM tryout_registrations WHERE user_id = $1 AND utbk_package_id = $2 AND status = 'approved'",
+              [req.user.id, package_id],
+            );
 
-          if (packageDone) {
-            await client.query("ROLLBACK");
-            return res.status(403).json({
-              success: false,
-              error:
-                "Akun gratis hanya dapat mengerjakan setiap paket tryout sebanyak 1 kali. Upgrade ke Premium untuk akses tanpa batas.",
-              code: "FREE_LIMIT_REACHED",
-            });
-          }
-
-          // Check if registration exists and is approved for this package
-          const regRes = await client.query(
-            "SELECT status FROM tryout_registrations WHERE user_id = $1 AND utbk_package_id = $2 AND status = 'approved'",
-            [req.user.id, package_id],
-          );
-
-          if (regRes.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(403).json({
-              success: false,
-              error: "Pendaftaran tryout belum diverifikasi admin.",
-              code: "NOT_VERIFIED",
-            });
+            if (regRes.rows.length === 0) {
+              await client.query("ROLLBACK");
+              return res.status(403).json({
+                success: false,
+                error: "Pendaftaran tryout belum diverifikasi admin.",
+                code: "NOT_VERIFIED",
+              });
+            }
           }
         }
       }
@@ -1517,6 +1552,19 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
         "[GET RESULT] Session found, submitted_at:",
         session.submitted_at,
       );
+
+      // Get score_released_at for this package
+      let scoreVisible = false;
+      try {
+        const pkgScoreRes = await pool.query(
+          "SELECT score_released_at FROM tryout_packages WHERE id = $1",
+          [session.package_id]
+        );
+        const scoreReleasedAt = pkgScoreRes.rows[0]?.score_released_at;
+        scoreVisible = scoreReleasedAt !== null && scoreReleasedAt !== undefined && new Date(scoreReleasedAt) <= new Date();
+      } catch (e) {
+        console.error("[GET RESULT] Failed to fetch score_released_at:", e.message);
+      }
     } catch (dbError) {
       console.error("[GET RESULT] Database query error:", dbError);
       return res
@@ -1824,15 +1872,15 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
     });
 
     // === STATIC / FIXED SCORING ===
-    // Use stored score if already computed and saved in tryout_sessions (score never changes!)
+    // Use stored score if already computed and saved with full subjectScores (score never changes!)
     let liveIRT;
-    if (session.total_score !== null && session.total_score !== undefined && session.score_breakdown) {
+    if (session.score_breakdown) {
       try {
         let storedBreakdown = session.score_breakdown;
         if (typeof storedBreakdown === "string") {
           storedBreakdown = JSON.parse(storedBreakdown);
         }
-        if (storedBreakdown && typeof storedBreakdown === "object" && storedBreakdown.totalScore !== undefined) {
+        if (storedBreakdown && typeof storedBreakdown === "object" && storedBreakdown.subjectScores && Object.keys(storedBreakdown.subjectScores).length > 0) {
           liveIRT = storedBreakdown;
         }
       } catch (e) {
@@ -1841,10 +1889,10 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
     }
 
     if (!liveIRT) {
+      // Calculate complete IRT ONCE across all questions of this attempt and persist immediately to DB
       try {
         const rawAnswersRes = await pool.query(
-          `
-          SELECT
+          `SELECT
             ua.chosen_choice_id,
             ua.answer_text,
             COALESCE(ac.is_correct, false) as is_correct,
@@ -1857,37 +1905,9 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
           LEFT JOIN answer_choices ac ON ua.chosen_choice_id = ac.id
           LEFT JOIN questions q ON ua.question_id = q.id
           LEFT JOIN subjects s ON q.subject_id = s.id
-          WHERE ua.session_id = ANY($1)
-        `,
-          [relatedSessionIds],
+          WHERE ua.session_id = ANY($1)`,
+          [relatedSessionIds.length > 0 ? relatedSessionIds : [sessionId]],
         );
-
-        for (const ans of rawAnswersRes.rows) {
-          if (ans.question_type === "short_answer" && ans.answer_text) {
-            const correctRes = await pool.query(
-              `SELECT content FROM answer_choices WHERE question_id = $1 AND is_correct = true LIMIT 1`,
-              [ans.question_id],
-            );
-            if (correctRes.rows.length > 0) {
-              ans.is_correct =
-                correctRes.rows[0].content.trim().toLowerCase() ===
-                ans.answer_text.trim().toLowerCase();
-            }
-          } else if (ans.question_type === "complex_mc_tf") {
-            const choicesRes = await pool.query(
-              `SELECT label, is_correct FROM answer_choices WHERE question_id = $1`,
-              [ans.question_id],
-            );
-            let userAnswersObj = {};
-            try {
-              userAnswersObj = ans.answer_text ? JSON.parse(ans.answer_text) : {};
-            } catch (e) {}
-            ans.is_correct = choicesRes.rows.length > 0 && choicesRes.rows.every((c) => {
-              const studentAns = userAnswersObj[c.label];
-              return studentAns !== undefined && studentAns === c.is_correct;
-            });
-          }
-        }
 
         const irtAnswers = rawAnswersRes.rows.map((ans) => ({
           chosen_choice_id: ans.chosen_choice_id,
@@ -1898,21 +1918,21 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
           time_spent_sec: ans.time_spent_sec || 0,
           question_type: ans.question_type,
           answer_text: ans.answer_text,
-          irtParams: itemStatsMap[ans.question_id] || undefined,
         }));
+
         liveIRT = calculateIRTScore(irtAnswers);
-        liveIRT.calibrationInfo = {
-          totalCalibrated: questionIds.filter(id => itemStatsMap[id]?.calibrated).length,
-          totalPartial: questionIds.filter(id => itemStatsMap[id]?.calibrated === 'partial').length,
-          totalDefault: questionIds.filter(id => !itemStatsMap[id] || !itemStatsMap[id].calibrated).length,
-        };
+
+        // PERSIST IMMEDIATELY TO DB so score is frozen and future fetches use DB record
+        if (typeof liveIRT.totalScore === "number" && !isNaN(liveIRT.totalScore)) {
+          await pool.query(
+            `UPDATE tryout_sessions SET total_score = $1, score_breakdown = $2 WHERE id = ANY($3)`,
+            [liveIRT.totalScore, JSON.stringify(liveIRT), relatedSessionIds.length > 0 ? relatedSessionIds : [sessionId]],
+          );
+        }
       } catch (irtErr) {
-        console.error(
-          "[GET RESULT] IRT recompute failed, using stored:",
-          irtErr.message,
-        );
-        liveIRT = scoreBreakdown || {
-          totalScore: session.total_score || 200,
+        console.error("[GET RESULT] Failed to calculate and persist IRT:", irtErr.message);
+        liveIRT = {
+          totalScore: session.total_score || 0,
           theta: 0,
           percentile: 0,
           subjectScores: {},
@@ -2089,7 +2109,8 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
         scoreChange,
         targetPassingGrade: avgPercentage,
         scoreBreakdown: liveIRT,
-        scoringMethod: "IRT-3PL (real-time)",
+        score_visible: scoreVisible,
+        scoringMethod: "IRT-3PL",
         computedAt: new Date().toISOString(),
         subjects: subjects.length > 0 ? subjects : [],
         questions: questions.length > 0 ? questions : [],
@@ -2216,6 +2237,22 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
 
     // Get package info from first session or from package_id
     const pkgTitle = sessionsRes.rows[0].title || "Tryout";
+
+    // Get score_released_at for this package
+    let scoreVisible = false;
+    try {
+      const effectivePkgId = package_id || sessionsRes.rows[0]?.package_id;
+      if (effectivePkgId) {
+        const pkgScoreRes = await pool.query(
+          "SELECT score_released_at FROM tryout_packages WHERE id = $1",
+          [effectivePkgId]
+        );
+        const scoreReleasedAt = pkgScoreRes.rows[0]?.score_released_at;
+        scoreVisible = scoreReleasedAt !== null && scoreReleasedAt !== undefined && new Date(scoreReleasedAt) <= new Date();
+      }
+    } catch (e) {
+      console.error("[COMBINED RESULT] Failed to fetch score_released_at:", e.message);
+    }
 
     // Parse subject_config
     let subjectConfig = sessionsRes.rows[0].subject_config;
@@ -2377,28 +2414,35 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
     });
 
     // === STATIC / FIXED SCORING on combined data ===
-    // Use stored score if already computed and saved in tryout_sessions (score never changes!)
+    // Use stored score if already computed with full subjectScores (score never changes!)
     let liveIRT;
-    const sessionWithScore = sessionsRes.rows.find(s => s.total_score !== null && s.total_score !== undefined && s.score_breakdown);
+    const sessionWithScore = sessionsRes.rows.find(s => {
+      if (!s.score_breakdown) return false;
+      try {
+        const sb = typeof s.score_breakdown === "string" ? JSON.parse(s.score_breakdown) : s.score_breakdown;
+        return sb && typeof sb === "object" && sb.subjectScores && Object.keys(sb.subjectScores).length > 0;
+      } catch {
+        return false;
+      }
+    });
+
     if (sessionWithScore) {
       try {
         let storedBreakdown = sessionWithScore.score_breakdown;
         if (typeof storedBreakdown === "string") {
           storedBreakdown = JSON.parse(storedBreakdown);
         }
-        if (storedBreakdown && typeof storedBreakdown === "object" && storedBreakdown.totalScore !== undefined) {
-          liveIRT = storedBreakdown;
-        }
+        liveIRT = storedBreakdown;
       } catch (e) {
         console.error("[COMBINED RESULT] Failed to parse stored score_breakdown:", e);
       }
     }
 
     if (!liveIRT) {
+      // Calculate complete IRT ONCE across ALL subtests of this attempt and persist immediately to DB
       try {
         const rawAnswersRes = await pool.query(
-          `
-          SELECT
+          `SELECT
             ua.chosen_choice_id,
             ua.answer_text,
             COALESCE(ac.is_correct, false) as is_correct,
@@ -2411,37 +2455,9 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
           LEFT JOIN answer_choices ac ON ua.chosen_choice_id = ac.id
           LEFT JOIN questions q ON ua.question_id = q.id
           LEFT JOIN subjects s ON q.subject_id = s.id
-          WHERE ua.session_id = ANY($1)
-        `,
+          WHERE ua.session_id = ANY($1)`,
           [validSessionIds],
         );
-
-        for (const ans of rawAnswersRes.rows) {
-          if (ans.question_type === "short_answer" && ans.answer_text) {
-            const correctRes = await pool.query(
-              `SELECT content FROM answer_choices WHERE question_id = $1 AND is_correct = true LIMIT 1`,
-              [ans.question_id],
-            );
-            if (correctRes.rows.length > 0) {
-              ans.is_correct =
-                correctRes.rows[0].content.trim().toLowerCase() ===
-                ans.answer_text.trim().toLowerCase();
-            }
-          } else if (ans.question_type === "complex_mc_tf") {
-            const choicesRes = await pool.query(
-              `SELECT label, is_correct FROM answer_choices WHERE question_id = $1`,
-              [ans.question_id],
-            );
-            let userAnswersObj = {};
-            try {
-              userAnswersObj = ans.answer_text ? JSON.parse(ans.answer_text) : {};
-            } catch (e) {}
-            ans.is_correct = choicesRes.rows.length > 0 && choicesRes.rows.every((c) => {
-              const studentAns = userAnswersObj[c.label];
-              return studentAns !== undefined && studentAns === c.is_correct;
-            });
-          }
-        }
 
         const irtAnswers = rawAnswersRes.rows.map((ans) => ({
           chosen_choice_id: ans.chosen_choice_id,
@@ -2452,18 +2468,25 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
           time_spent_sec: ans.time_spent_sec || 0,
           question_type: ans.question_type,
           answer_text: ans.answer_text,
-          irtParams: itemStatsMap[ans.question_id] || undefined,
         }));
+
         liveIRT = calculateIRTScore(irtAnswers);
-        // Add calibration metadata
-        liveIRT.calibrationInfo = {
-          totalCalibrated: questionIds.filter(id => itemStatsMap[id]?.calibrated).length,
-          totalPartial: questionIds.filter(id => itemStatsMap[id]?.calibrated === 'partial').length,
-          totalDefault: questionIds.filter(id => !itemStatsMap[id] || !itemStatsMap[id].calibrated).length,
-        };
+
+        // PERSIST IMMEDIATELY TO DB so score is frozen and future fetches use DB record
+        if (typeof liveIRT.totalScore === "number" && !isNaN(liveIRT.totalScore)) {
+          await pool.query(
+            `UPDATE tryout_sessions SET total_score = $1, score_breakdown = $2 WHERE id = ANY($3)`,
+            [liveIRT.totalScore, JSON.stringify(liveIRT), validSessionIds],
+          );
+        }
       } catch (irtErr) {
-        console.error("[COMBINED RESULT] IRT recompute failed:", irtErr.message);
-        liveIRT = { totalScore: 200, theta: 0, percentile: 0, subjectScores: {} };
+        console.error("[COMBINED RESULT] Failed to calculate and persist IRT:", irtErr.message);
+        liveIRT = {
+          totalScore: sessionsRes.rows[0]?.total_score || 0,
+          theta: 0,
+          percentile: 0,
+          subjectScores: {},
+        };
       }
     }
 
@@ -2630,7 +2653,8 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
         scoreChange,
         targetPassingGrade: avgPercentage,
         scoreBreakdown: liveIRT,
-        scoringMethod: "IRT-3PL (real-time combined)",
+        score_visible: scoreVisible,
+        scoringMethod: "IRT-3PL",
         computedAt: new Date().toISOString(),
         subjects: subjects.length > 0 ? subjects : [],
         questions: questions.length > 0 ? questions : [],
