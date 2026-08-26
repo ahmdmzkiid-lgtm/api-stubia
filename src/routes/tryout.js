@@ -987,6 +987,8 @@ router.post("/start", verifyToken, async (req, res, next) => {
         let isOngoingAttempt = false;
         if (is_first_subtest === false) {
           isOngoingAttempt = true;
+        } else if (attemptInfo.latestGroup && !attemptInfo.latestGroup.isCompleted && attemptInfo.latestGroup.sessionIds.length > 0) {
+          isOngoingAttempt = true;
         } else {
           // Check if there is an active session started in the current attempt window (< 24h since last completed or within last 24h)
           const lastCompletionRes = await client.query(
