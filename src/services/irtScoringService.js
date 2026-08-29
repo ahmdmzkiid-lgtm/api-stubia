@@ -183,8 +183,8 @@ function calculateIRTScore(answers) {
     const difficulty = ans.difficulty || 'medium';
     const irtParams = ans.irtParams || DEFAULT_IRT_PARAMS[difficulty] || DEFAULT_IRT_PARAMS.medium;
 
-    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf')
-      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '')
+    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf' || ans.question_type === 'complex_mc_multi')
+      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}')
       : (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined);
 
     if (!isAnswered) {
@@ -216,8 +216,8 @@ function calculateIRTScore(answers) {
     const difficulty = ans.difficulty || 'medium';
     const weight = WEIGHTS[difficulty] || 3;
 
-    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf')
-      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '')
+    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf' || ans.question_type === 'complex_mc_multi')
+      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}')
       : (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined);
 
     if (isAnswered) {
@@ -271,8 +271,8 @@ function calculateIRTScore(answers) {
       }
 
       subjectScores[subject].total++;
-      const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf')
-        ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '')
+      const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf' || ans.question_type === 'complex_mc_multi')
+        ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}')
         : (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined);
 
       if (isAnswered) {
@@ -371,8 +371,8 @@ function calculateQuickScore(answers) {
   const WEIGHTS = { easy: 2, medium: 3, hard: 4, hots: 5 };
 
   answers.forEach(ans => {
-    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf')
-      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '')
+    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf' || ans.question_type === 'complex_mc_multi')
+      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}')
       : (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined);
 
     if (!isAnswered) {
@@ -386,8 +386,8 @@ function calculateQuickScore(answers) {
 
   // Simple weighted score
   const rawScore = answers.reduce((score, ans) => {
-    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf')
-      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '')
+    const isAnswered = (ans.question_type === 'short_answer' || ans.question_type === 'complex_mc_tf' || ans.question_type === 'complex_mc_multi')
+      ? (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}')
       : (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined);
 
     if (!isAnswered) return score;

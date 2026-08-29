@@ -18,21 +18,103 @@ function calculateScaledScore(correctCount, totalCount) {
 }
 
 /**
- * Generates weak materi breakdown by aggregating correct/incorrect answers per topic
- * @param {Array} answersWithTopic Array of { topic_title, is_correct }
+ * Evaluates whether a student answer is correct for any TKA question type
+ */
+function evaluateTkaQuestionAnswer(qType, choices, ans) {
+  if (!ans) return false;
+  const { chosen_choice_id, answer_text } = ans;
+
+  if (qType === 'short_answer') {
+    const correctChoice = (choices || []).find(c => c.is_correct);
+    if (!correctChoice) return false;
+    const targetTxt = (correctChoice.content || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const userTxt = (answer_text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!userTxt) return false;
+    return userTxt === targetTxt || userTxt.replace(',', '.') === targetTxt.replace(',', '.');
+  }
+
+  if (qType === 'complex_mc_tf') {
+    let userAnswersObj = {};
+    try {
+      userAnswersObj = answer_text ? (typeof answer_text === 'string' ? JSON.parse(answer_text) : answer_text) : {};
+      if (!userAnswersObj || typeof userAnswersObj !== 'object' || Array.isArray(userAnswersObj)) userAnswersObj = {};
+    } catch (e) {
+      userAnswersObj = {};
+    }
+    if (!choices || choices.length === 0) return false;
+    return choices.every((c) => {
+      const studentAns = userAnswersObj[c.label] !== undefined ? userAnswersObj[c.label] : userAnswersObj[c.id];
+      if (studentAns === undefined) return false;
+      const parsedBool = (studentAns === true || studentAns === 'true' || studentAns === 1 || studentAns === '1');
+      return parsedBool === Boolean(c.is_correct);
+    });
+  }
+
+  if (qType === 'complex_mc_multi') {
+    let userSelected = [];
+    try {
+      userSelected = answer_text ? (typeof answer_text === 'string' ? JSON.parse(answer_text) : answer_text) : [];
+      if (!Array.isArray(userSelected)) userSelected = [];
+    } catch (e) {
+      userSelected = [];
+    }
+    const correctLabels = (choices || []).filter(c => c.is_correct).map(c => String(c.label).toUpperCase().trim());
+    const selectedNormalized = userSelected.map(s => {
+      const matched = (choices || []).find(c => c.id === s || String(c.id) === String(s));
+      return matched ? String(matched.label).toUpperCase().trim() : String(s).toUpperCase().trim();
+    });
+
+    if (correctLabels.length === 0 || selectedNormalized.length === 0) return false;
+
+    const correctSet = new Set(correctLabels);
+    const userSet = new Set(selectedNormalized);
+    if (correctSet.size !== userSet.size) return false;
+    for (const item of correctSet) {
+      if (!userSet.has(item)) return false;
+    }
+    return true;
+  }
+
+  // Default: multiple_choice
+  const correctChoice = (choices || []).find(c => c.is_correct);
+  if (!correctChoice) return false;
+  if (chosen_choice_id !== null && chosen_choice_id !== undefined && chosen_choice_id !== '') {
+    return String(chosen_choice_id) === String(correctChoice.id);
+  }
+  if (answer_text && String(answer_text).trim()) {
+    return String(answer_text).trim().toUpperCase() === String(correctChoice.label).trim().toUpperCase();
+  }
+  return false;
+}
+
+/**
+ * Generates weak materi breakdown by aggregating correct/incorrect answers per topic & subject
+ * @param {Array} answersWithTopic Array of { subject_id, subject_name, topic_title, is_correct }
  */
 function generateMateriAnalysis(answersWithTopic) {
   const map = {};
   for (const item of answersWithTopic) {
     const topic = item.topic_title || 'Materi Umum';
-    if (!map[topic]) {
-      map[topic] = { topic, total: 0, correct: 0, incorrect: 0, percentage: 0, status: 'Sedang' };
+    const subjectName = item.subject_name || 'Mata Pelajaran';
+    const subjectId = item.subject_id || '';
+    const key = `${subjectId}___${topic}`;
+    if (!map[key]) {
+      map[key] = {
+        subject_id: subjectId,
+        subject_name: subjectName,
+        topic,
+        total: 0,
+        correct: 0,
+        incorrect: 0,
+        percentage: 0,
+        status: 'Sedang'
+      };
     }
-    map[topic].total += 1;
+    map[key].total += 1;
     if (item.is_correct) {
-      map[topic].correct += 1;
+      map[key].correct += 1;
     } else {
-      map[topic].incorrect += 1;
+      map[key].incorrect += 1;
     }
   }
 
@@ -227,7 +309,7 @@ router.get('/latihan/questions', verifyToken, async (req, res, next) => {
 
     let query = `
       SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position,
-             q.difficulty, q.question_type, q.display_order, q.package_number,
+             q.difficulty, q.question_type, q.options_config, q.display_order, q.package_number,
              t.title as topic_title, s.name as subject_name
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
@@ -299,26 +381,33 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
 
     const qIds = answers.map(a => a.question_id);
     const qMapRes = await client.query(
-      `SELECT q.id, q.question_type, q.topic_id, t.title as topic_title,
-              c.id as correct_choice_id, c.content as correct_content
+      `SELECT q.id, q.question_type, q.topic_id, q.options_config, t.title as topic_title
        FROM tka_questions q
        LEFT JOIN tka_topics t ON q.topic_id = t.id
-       LEFT JOIN tka_answer_choices c ON c.question_id = q.id AND c.is_correct = TRUE
        WHERE q.id = ANY($1)`,
       [qIds]
     );
 
+    const choicesRes = await client.query(
+      `SELECT id, question_id, label, content, is_correct FROM tka_answer_choices WHERE question_id = ANY($1)`,
+      [qIds]
+    );
+
+    const choicesByQuestion = {};
+    for (const c of choicesRes.rows) {
+      if (!choicesByQuestion[c.question_id]) choicesByQuestion[c.question_id] = [];
+      choicesByQuestion[c.question_id].push(c);
+    }
+
     const qInfoMap = {};
     for (const row of qMapRes.rows) {
-      if (!qInfoMap[row.id]) {
-        qInfoMap[row.id] = {
-          question_type: row.question_type,
-          topic_id: row.topic_id,
-          topic_title: row.topic_title || 'Materi Umum',
-          correct_choice_id: row.correct_choice_id,
-          correct_content: row.correct_content
-        };
-      }
+      qInfoMap[row.id] = {
+        question_type: row.question_type,
+        topic_id: row.topic_id,
+        topic_title: row.topic_title || 'Materi Umum',
+        options_config: row.options_config || {},
+        choices: choicesByQuestion[row.id] || []
+      };
     }
 
     let correctCount = 0;
@@ -330,17 +419,13 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
       const qInfo = qInfoMap[ans.question_id];
       let isCorrect = false;
 
-      if (!ans.chosen_choice_id && !ans.answer_text) {
+      const hasAnswer = (ans.chosen_choice_id !== null && ans.chosen_choice_id !== undefined && ans.chosen_choice_id !== '') ||
+        (ans.answer_text !== null && ans.answer_text !== undefined && String(ans.answer_text).trim() !== '' && String(ans.answer_text) !== '[]' && String(ans.answer_text) !== '{}');
+
+      if (!hasAnswer) {
         unansweredCount++;
       } else if (qInfo) {
-        if (qInfo.question_type === 'short_answer') {
-          const userTxt = (ans.answer_text || '').trim().toLowerCase();
-          const targetTxt = (qInfo.correct_content || '').trim().toLowerCase();
-          isCorrect = userTxt !== '' && userTxt === targetTxt;
-        } else {
-          isCorrect = ans.chosen_choice_id === qInfo.correct_choice_id;
-        }
-
+        isCorrect = evaluateTkaQuestionAnswer(qInfo.question_type, qInfo.choices, ans);
         if (isCorrect) {
           correctCount++;
         } else {
@@ -349,6 +434,8 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
       }
 
       answerAnalysisItems.push({
+        subject_id: subject_id,
+        subject_name: subjectName,
         topic_title: qInfo?.topic_title || 'Materi Umum',
         is_correct: isCorrect
       });
@@ -371,14 +458,7 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
     for (let i = 0; i < answers.length; i++) {
       const ans = answers[i];
       const qInfo = qInfoMap[ans.question_id];
-      let isCorrect = false;
-      if (qInfo) {
-        if (qInfo.question_type === 'short_answer') {
-          isCorrect = (ans.answer_text || '').trim().toLowerCase() === (qInfo.correct_content || '').trim().toLowerCase();
-        } else {
-          isCorrect = ans.chosen_choice_id === qInfo.correct_choice_id;
-        }
-      }
+      const isCorrect = qInfo ? evaluateTkaQuestionAnswer(qInfo.question_type, qInfo.choices, ans) : false;
 
       await client.query(
         `INSERT INTO tka_latihan_answers (session_id, question_id, chosen_choice_id, answer_text, is_correct, time_spent_sec, position)
@@ -417,7 +497,7 @@ router.get('/latihan/hasil/:sessionId', verifyToken, async (req, res, next) => {
     const session = sessionRes.rows[0];
 
     const answersRes = await pool.query(
-      `SELECT la.*, q.content as question_content, q.stimulus, q.image_url, q.image_position, q.question_type, s.name as subject_name,
+      `SELECT la.*, q.content as question_content, q.stimulus, q.image_url, q.image_position, q.question_type, q.options_config, s.name as subject_name,
               ac.label as chosen_label, ac.content as chosen_content
        FROM tka_latihan_answers la
        JOIN tka_questions q ON la.question_id = q.id
@@ -440,12 +520,65 @@ router.get('/latihan/hasil/:sessionId', verifyToken, async (req, res, next) => {
       choicesByQuestion[c.question_id].push(c);
     }
 
-    const answers = answersRes.rows.map(a => ({
-      ...a,
-      choices: choicesByQuestion[a.question_id] || []
-    }));
+    // Calculate ranking & participant stats
+    let userRank = null;
+    let totalParticipants = 0;
+    try {
+      let qParams = [session.subject_id];
+      let whereClause = `WHERE ls.subject_id = $1`;
+      if (session.topic_id) {
+        qParams.push(session.topic_id);
+        whereClause += ` AND ls.topic_id = $${qParams.length}`;
+      }
+      if (session.package_number) {
+        qParams.push(session.package_number);
+        whereClause += ` AND ls.package_number = $${qParams.length}`;
+      }
 
-    res.json({ success: true, data: { session, answers } });
+      const leaderboardRes = await pool.query(
+        `SELECT ls.user_id,
+                COALESCE(
+                  (SELECT ls_curr.total_score FROM tka_latihan_sessions ls_curr
+                   ${whereClause.replace(/ls\./g, 'ls_curr.')} AND ls_curr.user_id = ls.user_id
+                     AND ls_curr.submitted_at IS NOT NULL AND ls_curr.total_score IS NOT NULL
+                   ORDER BY ls_curr.submitted_at DESC, ls_curr.started_at DESC LIMIT 1),
+                  MAX(ls.total_score)
+                ) as total_score
+         FROM tka_latihan_sessions ls
+         JOIN users u ON u.id = ls.user_id
+         ${whereClause}
+           AND ls.submitted_at IS NOT NULL
+           AND ls.total_score IS NOT NULL
+           AND u.role = 'student'
+         GROUP BY ls.user_id`,
+        qParams
+      );
+
+      const allSorted = leaderboardRes.rows
+        .filter((r) => r.total_score !== null && r.total_score !== undefined)
+        .sort((a, b) => (Number(b.total_score) || 0) - (Number(a.total_score) || 0));
+
+      totalParticipants = allSorted.length;
+      const userIdx = allSorted.findIndex((r) => r.user_id === req.user.id);
+      if (userIdx >= 0) {
+        userRank = {
+          rank: userIdx + 1,
+          total_participants: totalParticipants
+        };
+      }
+    } catch (e) {
+      console.error("Error calculating latihan rank:", e);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        session,
+        answers,
+        user_rank: userRank,
+        total_participants: totalParticipants
+      }
+    });
   } catch (err) {
     next(err);
   }
@@ -605,7 +738,7 @@ router.get('/tryout/session/:sessionId/questions', verifyToken, async (req, res,
 
     let query = `
       SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position,
-             q.difficulty, q.question_type, q.display_order, s.name as subject_name,
+             q.difficulty, q.question_type, q.options_config, q.display_order, s.name as subject_name,
              ua.chosen_choice_id, ua.answer_text, ua.is_flagged
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
@@ -619,7 +752,7 @@ router.get('/tryout/session/:sessionId/questions', verifyToken, async (req, res,
       query += ` AND q.subject_id = $${params.length}`;
     }
 
-    query += ` ORDER BY q.display_order ASC, q.created_at ASC`;
+    query += ` ORDER BY s.display_order ASC, s.name ASC, q.display_order ASC, q.created_at ASC`;
 
     const qResult = await pool.query(query, params);
     const questions = qResult.rows;
@@ -697,18 +830,47 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
 
     const session = sRes.rows[0];
 
-    const qRes = await client.query(
-      `SELECT q.id, q.subject_id, q.topic_id, q.question_type, s.name as subject_name, t.title as topic_title,
-              ac.id as correct_choice_id, ac.content as correct_content
-       FROM tka_questions q
-       JOIN tka_subjects s ON q.subject_id = s.id
-       LEFT JOIN tka_topics t ON q.topic_id = t.id
-       LEFT JOIN tka_answer_choices ac ON ac.question_id = q.id AND ac.is_correct = TRUE
-       WHERE q.tryout_package_id = $1`,
-      [session.package_id]
-    );
+    let electives = [];
+    if (session.selected_elective_subjects) {
+      try {
+        electives = typeof session.selected_elective_subjects === 'string'
+          ? JSON.parse(session.selected_elective_subjects)
+          : session.selected_elective_subjects;
+        if (!Array.isArray(electives)) electives = [];
+      } catch (e) {
+        electives = [];
+      }
+    }
+
+    let qQuery = `
+      SELECT q.id, q.subject_id, q.topic_id, q.question_type, q.options_config, s.name as subject_name, s.group_category, t.title as topic_title
+      FROM tka_questions q
+      JOIN tka_subjects s ON q.subject_id = s.id
+      LEFT JOIN tka_topics t ON q.topic_id = t.id
+      WHERE q.tryout_package_id = $1
+    `;
+    const qParams = [session.package_id];
+
+    if (session.education_level === 'SMA' && electives.length > 0) {
+      qParams.push(electives);
+      qQuery += ` AND (s.group_category = 'wajib' OR q.subject_id = ANY($${qParams.length}))`;
+    }
+
+    const qRes = await client.query(qQuery, qParams);
 
     const questions = qRes.rows;
+    const qIds = questions.map(q => q.id);
+
+    const choicesRes = await client.query(
+      `SELECT id, question_id, label, content, is_correct FROM tka_answer_choices WHERE question_id = ANY($1)`,
+      [qIds]
+    );
+
+    const choicesByQuestion = {};
+    for (const c of choicesRes.rows) {
+      if (!choicesByQuestion[c.question_id]) choicesByQuestion[c.question_id] = [];
+      choicesByQuestion[c.question_id].push(c);
+    }
 
     const uAnswersRes = await client.query(
       `SELECT * FROM tka_user_answers WHERE session_id = $1`,
@@ -733,23 +895,16 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
       subjectStats[sId].total += 1;
 
       const ua = userAnsMap[q.id];
-      let isCorrect = false;
-
-      if (ua) {
-        if (q.question_type === 'short_answer') {
-          const userTxt = (ua.answer_text || '').trim().toLowerCase();
-          const targetTxt = (q.correct_content || '').trim().toLowerCase();
-          isCorrect = userTxt !== '' && userTxt === targetTxt;
-        } else {
-          isCorrect = ua.chosen_choice_id === q.correct_choice_id;
-        }
-      }
+      const qChoices = choicesByQuestion[q.id] || [];
+      const isCorrect = ua ? evaluateTkaQuestionAnswer(q.question_type, qChoices, ua) : false;
 
       if (isCorrect) {
         subjectStats[sId].correct += 1;
       }
 
       materiItems.push({
+        subject_id: q.subject_id,
+        subject_name: q.subject_name || 'Mata Pelajaran',
         topic_title: q.topic_title || 'Materi Umum',
         is_correct: isCorrect
       });
@@ -814,26 +969,45 @@ router.get('/tryout/hasil/:sessionId', verifyToken, async (req, res, next) => {
 
     const session = sRes.rows[0];
 
-    const qRes = await pool.query(
-      `SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position, q.question_type,
-              s.name as subject_name, t.title as topic_title,
-              ua.chosen_choice_id, ua.answer_text, ua.is_flagged
-       FROM tka_questions q
-       JOIN tka_subjects s ON q.subject_id = s.id
-       LEFT JOIN tka_topics t ON q.topic_id = t.id
-       LEFT JOIN tka_user_answers ua ON ua.question_id = q.id AND ua.session_id = $1
-       WHERE q.tryout_package_id = $2
-       ORDER BY q.display_order ASC, q.created_at ASC`,
-      [sessionId, session.package_id]
-    );
+    let electives = [];
+    if (session.selected_elective_subjects) {
+      try {
+        electives = typeof session.selected_elective_subjects === 'string'
+          ? JSON.parse(session.selected_elective_subjects)
+          : session.selected_elective_subjects;
+        if (!Array.isArray(electives)) electives = [];
+      } catch (e) {
+        electives = [];
+      }
+    }
+
+    let qQuery = `
+      SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position, q.question_type, q.options_config,
+             s.name as subject_name, s.group_category, t.title as topic_title,
+             ua.chosen_choice_id, ua.answer_text, ua.is_flagged
+      FROM tka_questions q
+      JOIN tka_subjects s ON q.subject_id = s.id
+      LEFT JOIN tka_topics t ON q.topic_id = t.id
+      LEFT JOIN tka_user_answers ua ON ua.question_id = q.id AND ua.session_id = $1
+      WHERE q.tryout_package_id = $2
+    `;
+    const qParams = [sessionId, session.package_id];
+
+    if (session.education_level === 'SMA' && electives.length > 0) {
+      qParams.push(electives);
+      qQuery += ` AND (s.group_category = 'wajib' OR q.subject_id = ANY($${qParams.length}))`;
+    }
+
+    qQuery += ` ORDER BY s.display_order ASC, s.name ASC, q.display_order ASC, q.created_at ASC`;
+    const qRes = await pool.query(qQuery, qParams);
 
     const questions = qRes.rows;
     const qIds = questions.map(q => q.id);
 
-    const choicesRes = await pool.query(
+    const choicesRes = qIds.length > 0 ? await pool.query(
       `SELECT * FROM tka_answer_choices WHERE question_id = ANY($1) ORDER BY label ASC`,
       [qIds]
-    );
+    ) : { rows: [] };
 
     const choicesByQuestion = {};
     for (const c of choicesRes.rows) {
@@ -841,12 +1015,65 @@ router.get('/tryout/hasil/:sessionId', verifyToken, async (req, res, next) => {
       choicesByQuestion[c.question_id].push(c);
     }
 
-    const fullQuestions = questions.map(q => ({
-      ...q,
-      choices: choicesByQuestion[q.id] || []
-    }));
+    const fullQuestions = questions.map(q => {
+      const qChoices = choicesByQuestion[q.id] || [];
+      const ua = { chosen_choice_id: q.chosen_choice_id, answer_text: q.answer_text };
+      const is_correct = evaluateTkaQuestionAnswer(q.question_type, qChoices, ua);
+      return {
+        ...q,
+        is_correct,
+        choices: qChoices
+      };
+    });
 
-    res.json({ success: true, data: { session, questions: fullQuestions } });
+    // Calculate ranking & participant stats
+    let userRank = null;
+    let totalParticipants = 0;
+    try {
+      const leaderboardRes = await pool.query(
+        `SELECT ts.user_id,
+                COALESCE(
+                  (SELECT ts_curr.total_score FROM tka_tryout_sessions ts_curr
+                   WHERE ts_curr.user_id = ts.user_id AND ts_curr.package_id = $1
+                     AND ts_curr.submitted_at IS NOT NULL AND ts_curr.total_score IS NOT NULL
+                   ORDER BY ts_curr.submitted_at DESC, ts_curr.started_at DESC LIMIT 1),
+                  MAX(ts.total_score)
+                ) as total_score
+         FROM tka_tryout_sessions ts
+         JOIN users u ON u.id = ts.user_id
+         WHERE ts.package_id = $1
+           AND ts.submitted_at IS NOT NULL
+           AND ts.total_score IS NOT NULL
+           AND u.role = 'student'
+         GROUP BY ts.user_id`,
+        [session.package_id]
+      );
+
+      const allSorted = leaderboardRes.rows
+        .filter((r) => r.total_score !== null && r.total_score !== undefined)
+        .sort((a, b) => (Number(b.total_score) || 0) - (Number(a.total_score) || 0));
+
+      totalParticipants = allSorted.length;
+      const userIdx = allSorted.findIndex((r) => r.user_id === req.user.id);
+      if (userIdx >= 0) {
+        userRank = {
+          rank: userIdx + 1,
+          total_participants: totalParticipants
+        };
+      }
+    } catch (e) {
+      console.error("Error calculating tryout rank:", e);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        session,
+        questions: fullQuestions,
+        user_rank: userRank,
+        total_participants: totalParticipants
+      }
+    });
   } catch (err) {
     next(err);
   }
@@ -1008,7 +1235,7 @@ router.get('/admin/questions', [verifyToken, verifyAdmin], async (req, res, next
       query += ` AND q.tryout_package_id IS NULL`;
     }
 
-    query += ` ORDER BY q.display_order ASC, q.created_at DESC`;
+    query += ` ORDER BY s.display_order ASC, s.name ASC, q.display_order ASC, q.created_at ASC`;
 
     const qResult = await pool.query(query, params);
     const questions = qResult.rows;
@@ -1048,7 +1275,7 @@ router.post('/admin/questions', [verifyToken, verifyAdmin], async (req, res, nex
     const {
       id, subject_id, topic_id, tryout_package_id, education_level, package_number = 1,
       content, stimulus, image_url, image_position = 'after', difficulty = 'medium',
-      question_type = 'multiple_choice', display_order = 1, choices = []
+      question_type = 'multiple_choice', options_config = {}, display_order, choices = []
     } = req.body;
 
     if (!subject_id || !education_level || !content) {
@@ -1059,22 +1286,39 @@ router.post('/admin/questions', [verifyToken, verifyAdmin], async (req, res, nex
     let questionId = id;
 
     if (id) {
+      // If display_order is provided from form, use it; otherwise preserve existing display_order in DB
+      let targetOrder = display_order;
+      if (targetOrder === undefined || targetOrder === null) {
+        const existingQ = await client.query('SELECT display_order FROM tka_questions WHERE id = $1', [id]);
+        targetOrder = existingQ.rows[0]?.display_order || 1;
+      }
+
       await client.query(
         `UPDATE tka_questions
          SET subject_id = $1, topic_id = $2, tryout_package_id = $3, education_level = $4,
              content = $5, stimulus = $6, image_url = $7, image_position = $8, difficulty = $9,
-             question_type = $10, display_order = $11, content_hash = $12, package_number = $13
-         WHERE id = $14`,
-        [subject_id, topic_id || null, tryout_package_id || null, education_level, content, stimulus || null, image_url || null, image_position, difficulty, question_type, display_order, contentHash, package_number, id]
+             question_type = $10, options_config = $11, display_order = $12, content_hash = $13, package_number = $14
+         WHERE id = $15`,
+        [subject_id, topic_id || null, tryout_package_id || null, education_level, content, stimulus || null, image_url || null, image_position, difficulty, question_type, JSON.stringify(options_config || {}), targetOrder, contentHash, package_number, id]
       );
       await client.query('DELETE FROM tka_answer_choices WHERE question_id = $1', [id]);
     } else {
+      // For new question, calculate next display_order if not provided
+      let targetOrder = display_order;
+      if (targetOrder === undefined || targetOrder === null) {
+        const maxOrderRes = await client.query(
+          `SELECT COALESCE(MAX(display_order), 0) as max_order FROM tka_questions WHERE subject_id = $1 AND (($2::uuid IS NULL AND tryout_package_id IS NULL) OR tryout_package_id = $2)`,
+          [subject_id, tryout_package_id || null]
+        );
+        targetOrder = (parseInt(maxOrderRes.rows[0]?.max_order, 10) || 0) + 1;
+      }
+
       const qRes = await client.query(
         `INSERT INTO tka_questions
-         (subject_id, topic_id, tryout_package_id, education_level, content, stimulus, image_url, image_position, difficulty, question_type, display_order, content_hash, package_number, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         (subject_id, topic_id, tryout_package_id, education_level, content, stimulus, image_url, image_position, difficulty, question_type, options_config, display_order, content_hash, package_number, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id`,
-        [subject_id, topic_id || null, tryout_package_id || null, education_level, content, stimulus || null, image_url || null, image_position, difficulty, question_type, display_order, contentHash, package_number, req.user.id]
+        [subject_id, topic_id || null, tryout_package_id || null, education_level, content, stimulus || null, image_url || null, image_position, difficulty, question_type, JSON.stringify(options_config || {}), targetOrder, contentHash, package_number, req.user.id]
       );
       questionId = qRes.rows[0].id;
     }
@@ -1169,6 +1413,16 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
   }
 
   const ALIASES = {
+    materi: [
+      'materi', 'topik', 'topic', 'judul materi', 'bab', 'materi pokok',
+      'nama materi', 'subtes materi', 'materi/topik', 'materi / topik',
+      'materi soal', 'bab/materi', 'bab materi'
+    ],
+    tingkat_kesulitan: [
+      'tingkat kesulitan', 'tingkat_kesulitan', 'kesulitan', 'difficulty',
+      'level kesulitan', 'level', 'tingkat', 'kesulitan soal',
+      'kategori kesulitan', 'derajat kesulitan', 'tingkat kesukaran'
+    ],
     stimulus: ['stimulus', 'wacana', 'bacaan'],
     soal: ['soal', 'content', 'question', 'pertanyaan'],
     opsi_a: ['opsi a', 'opsia', 'choice_a', 'pilihan a', 'a'],
@@ -1180,6 +1434,7 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
     pembahasan: ['pembahasan', 'explanation', 'penjelasan'],
     image_url: ['gambar', 'image', 'image_url', 'url gambar', 'foto'],
     tipe_soal: ['tipe soal', 'tipe', 'question_type', 'type', 'tipe_soal'],
+    label_kolom: ['label_kolom', 'label kolom', 'kolom_pilihan', 'tf_label', 'label_benar_salah', 'opsi_label', 'label_opsi'],
     image_position: ['posisi gambar', 'posisi_gambar', 'image_position', 'image position']
   };
 
@@ -1191,6 +1446,36 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
         if (clean === alias) {
           const val = row[rowKey];
           if (val === null || val === undefined) return '';
+          return String(val).trim();
+        }
+      }
+    }
+    return '';
+  };
+
+  const resolveWithPositionalFallback = (row, key, pos) => {
+    const directVal = resolve(row, key);
+    if (directVal) return directVal;
+
+    const keys = Object.keys(row);
+    if (keys.length === 0) return '';
+    if (pos === 'start') {
+      const firstKey = keys[0];
+      const cleanKey = firstKey.replace(/^\uFEFF/, '').trim().toLowerCase();
+      const isKnownStandardCol = ['soal', 'content', 'stimulus', 'opsi a', 'a', 'opsi b', 'b', 'kunci', 'kunci jawaban'].includes(cleanKey);
+      if (!isKnownStandardCol) {
+        const val = row[firstKey];
+        if (val !== null && val !== undefined && String(val).trim() !== '') {
+          return String(val).trim();
+        }
+      }
+    } else if (pos === 'end') {
+      const lastKey = keys[keys.length - 1];
+      const cleanKey = lastKey.replace(/^\uFEFF/, '').trim().toLowerCase();
+      const isKnownStandardCol = ['soal', 'opsi a', 'opsi b', 'opsi c', 'opsi d', 'opsi e', 'kunci'].includes(cleanKey);
+      if (!isKnownStandardCol) {
+        const val = row[lastKey];
+        if (val !== null && val !== undefined && String(val).trim() !== '') {
           return String(val).trim();
         }
       }
@@ -1215,14 +1500,47 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
   let importedCount = 0;
   let rejectedCount = 0;
   const errors = [];
+  const topicCache = {};
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    const maxOrderRes = await client.query(
+      `SELECT COALESCE(MAX(display_order), 0) as max_order FROM tka_questions WHERE subject_id = $1 AND (($2::uuid IS NULL AND tryout_package_id IS NULL) OR tryout_package_id = $2)`,
+      [subject_id, tryout_package_id || null]
+    );
+    const baseOrder = parseInt(maxOrderRes.rows[0]?.max_order, 10) || 0;
+
     for (let i = 0; i < results.length; i++) {
       const row = results[i];
       const rowNum = i + 2;
+
+      let rawMateri = resolve(row, 'materi');
+      let rawDifficulty = resolve(row, 'tingkat_kesulitan');
+
+      // Check positional fallback if not matched by header alias (urutan awal / urutan akhir)
+      if (!rawMateri) {
+        const candidateStart = resolveWithPositionalFallback(row, 'materi', 'start');
+        const candidateEnd = resolveWithPositionalFallback(row, 'materi', 'end');
+        const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
+        if (candidateStart && !diffKeywords.includes(candidateStart.toLowerCase())) {
+          rawMateri = candidateStart;
+        } else if (candidateEnd && !diffKeywords.includes(candidateEnd.toLowerCase())) {
+          rawMateri = candidateEnd;
+        }
+      }
+
+      if (!rawDifficulty) {
+        const candidateStart = resolveWithPositionalFallback(row, 'tingkat_kesulitan', 'start');
+        const candidateEnd = resolveWithPositionalFallback(row, 'tingkat_kesulitan', 'end');
+        const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
+        if (candidateEnd && diffKeywords.includes(candidateEnd.toLowerCase())) {
+          rawDifficulty = candidateEnd;
+        } else if (candidateStart && diffKeywords.includes(candidateStart.toLowerCase())) {
+          rawDifficulty = candidateStart;
+        }
+      }
 
       const stimulus = resolve(row, 'stimulus');
       const soal = resolve(row, 'soal');
@@ -1236,6 +1554,7 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
       const imageUrl = resolve(row, 'image_url');
       const rawTipe = resolve(row, 'tipe_soal').toLowerCase();
       const rawPos = resolve(row, 'image_position').toLowerCase();
+      const rawLabelKolom = resolve(row, 'label_kolom');
 
       const imagePosition = ['before', 'top', 'atas'].includes(rawPos) ? 'before' : 'after';
 
@@ -1246,19 +1565,112 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
       }
 
       let questionType = 'multiple_choice';
-      if (rawTipe.includes('short') || rawTipe.includes('isian')) {
+      const cleanTipe = rawTipe.replace(/[\s\-_]+/g, ' ').trim();
+
+      if (
+        cleanTipe === 'multiple choice' ||
+        cleanTipe === 'single' ||
+        cleanTipe === 'pg tunggal' ||
+        cleanTipe === 'pilihan ganda tunggal' ||
+        cleanTipe === 'pilihan ganda' ||
+        cleanTipe === 'pg'
+      ) {
+        questionType = 'multiple_choice';
+      } else if (
+        cleanTipe.includes('complex mc multi') ||
+        cleanTipe.includes('multi jawaban') ||
+        cleanTipe.includes('multi opsi') ||
+        cleanTipe.includes('lebih dari 1') ||
+        cleanTipe.includes('lebih dari satu') ||
+        cleanTipe.includes('banyak jawaban') ||
+        cleanTipe.includes('centang') ||
+        (cleanTipe.includes('multi') && !cleanTipe.includes('multiple choice'))
+      ) {
+        questionType = 'complex_mc_multi';
+      } else if (
+        cleanTipe.includes('short') ||
+        cleanTipe.includes('isian') ||
+        cleanTipe.includes('singkat')
+      ) {
         questionType = 'short_answer';
-      } else if (rawTipe.includes('complex') || rawTipe.includes('benar')) {
+      } else if (
+        cleanTipe.includes('complex mc tf') ||
+        cleanTipe.includes('kompleks') ||
+        cleanTipe.includes('complex') ||
+        cleanTipe.includes('benar') ||
+        cleanTipe.includes('salah') ||
+        cleanTipe.includes('tf') ||
+        cleanTipe.includes('tepat') ||
+        cleanTipe.includes('true')
+      ) {
         questionType = 'complex_mc_tf';
+      }
+
+      let optionsConfig = {};
+      const cleanKunci = (kunci || '').toUpperCase().trim();
+
+      if (questionType === 'complex_mc_tf') {
+        if (rawLabelKolom) {
+          const parts = rawLabelKolom.split(/[\/,;|\-]+/).map(p => p.trim()).filter(Boolean);
+          if (parts.length >= 2) {
+            optionsConfig = { true_label: parts[0], false_label: parts[1] };
+          }
+        } else if (cleanKunci.includes('TRUE') || cleanKunci.includes('FALSE')) {
+          optionsConfig = { true_label: 'TRUE', false_label: 'FALSE' };
+        } else if (cleanKunci.includes('TEPAT')) {
+          optionsConfig = { true_label: 'Tepat', false_label: 'Tidak Tepat' };
+        } else if (cleanKunci.includes('SESUAI')) {
+          optionsConfig = { true_label: 'Sesuai', false_label: 'Tidak Sesuai' };
+        } else if (cleanKunci.includes('YA') || cleanKunci.includes('TIDAK')) {
+          optionsConfig = { true_label: 'Ya', false_label: 'Tidak' };
+        } else {
+          optionsConfig = { true_label: 'Benar', false_label: 'Salah' };
+        }
+      }
+
+      // Resolve difficulty per question
+      let resolvedDifficulty = difficulty || 'medium';
+      if (rawDifficulty) {
+        const dLower = rawDifficulty.toLowerCase().trim();
+        if (dLower.includes('mudah') || dLower.includes('easy') || dLower.includes('dasar') || dLower === '1') {
+          resolvedDifficulty = 'easy';
+        } else if (dLower.includes('sulit') || dLower.includes('hard') || dLower.includes('sukar') || dLower.includes('hots') || dLower.includes('tinggi') || dLower === '3') {
+          resolvedDifficulty = 'hard';
+        } else if (dLower.includes('sedang') || dLower.includes('medium') || dLower.includes('menengah') || dLower === '2') {
+          resolvedDifficulty = 'medium';
+        }
+      }
+
+      // Resolve topic/materi per question (auto-link or auto-create topic if named)
+      let resolvedTopicId = topic_id || null;
+      if (rawMateri) {
+        const materiKey = rawMateri.toLowerCase().trim();
+        if (!topicCache[materiKey]) {
+          const tRes = await client.query(
+            `SELECT id FROM tka_topics WHERE subject_id = $1 AND LOWER(TRIM(title)) = LOWER(TRIM($2)) LIMIT 1`,
+            [subject_id, rawMateri.trim()]
+          );
+          if (tRes.rows.length > 0) {
+            topicCache[materiKey] = tRes.rows[0].id;
+          } else {
+            const newTopicRes = await client.query(
+              `INSERT INTO tka_topics (subject_id, title, difficulty_level, display_order)
+               VALUES ($1, $2, 'Dasar', 0) RETURNING id`,
+              [subject_id, rawMateri.trim()]
+            );
+            topicCache[materiKey] = newTopicRes.rows[0].id;
+          }
+        }
+        resolvedTopicId = topicCache[materiKey];
       }
 
       const contentHash = generateQuestionHash(soal);
 
       const qRes = await client.query(
         `INSERT INTO tka_questions
-         (subject_id, topic_id, tryout_package_id, education_level, content, stimulus, image_url, image_position, difficulty, question_type, display_order, content_hash, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
-        [subject_id, topic_id || null, tryout_package_id || null, education_level, soal, stimulus || null, imageUrl || null, imagePosition, difficulty, questionType, i + 1, contentHash, req.user.id]
+         (subject_id, topic_id, tryout_package_id, education_level, content, stimulus, image_url, image_position, difficulty, question_type, options_config, display_order, content_hash, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+        [subject_id, resolvedTopicId, tryout_package_id || null, education_level, soal, stimulus || null, imageUrl || null, imagePosition, resolvedDifficulty, questionType, JSON.stringify(optionsConfig), baseOrder + i + 1, contentHash, req.user.id]
       );
 
       const questionId = qRes.rows[0].id;
@@ -1270,15 +1682,76 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
         { label: 'E', content: opsiE },
       ].filter(c => c.content !== '');
 
-      const cleanKunci = (kunci || '').toUpperCase().trim();
-
-      for (const choice of choicesRaw) {
-        const isCorrect = cleanKunci.includes(choice.label);
+      if (questionType === 'short_answer') {
         await client.query(
           `INSERT INTO tka_answer_choices (question_id, label, content, is_correct, explanation)
            VALUES ($1, $2, $3, $4, $5)`,
-          [questionId, choice.label, choice.content, isCorrect, pembahasan || '']
+          [questionId, 'A', kunci, true, pembahasan || '']
         );
+      } else if (questionType === 'complex_mc_multi') {
+        const matchedLetters = cleanKunci.match(/[A-E]/g) || [];
+        const correctLetters = Array.from(new Set(matchedLetters));
+        for (const choice of choicesRaw) {
+          const isCorrect = correctLetters.includes(choice.label);
+          await client.query(
+            `INSERT INTO tka_answer_choices (question_id, label, content, is_correct, explanation)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [questionId, choice.label, choice.content, isCorrect, pembahasan || '']
+          );
+        }
+      } else if (questionType === 'complex_mc_tf') {
+        const isValueTrue = (val) => {
+          const v = String(val).trim().toUpperCase();
+          if (v.startsWith('TIDAK') || v.startsWith('BUKAN') || v === 'S' || v === 'SALAH' || v === 'FALSE' || v === '0') {
+            return false;
+          }
+          if (v === 'B' || v === 'T' || v === '1' || v === 'YA' || v === 'BENAR' || v === 'TRUE' || v === 'TEPAT' || v === 'SESUAI' || v.startsWith('BENAR') || v.startsWith('TRUE') || v.startsWith('TEPAT') || v.startsWith('SESUAI')) {
+            return true;
+          }
+          return false;
+        };
+
+        let correctnessMap = {};
+        if (cleanKunci.includes(':')) {
+          const pairs = cleanKunci.split(/[,;\n\r]+/);
+          for (const pair of pairs) {
+            const colonIdx = pair.indexOf(':');
+            if (colonIdx !== -1) {
+              const lbl = pair.substring(0, colonIdx).trim().toUpperCase();
+              const val = pair.substring(colonIdx + 1).trim();
+              if (lbl && val) {
+                correctnessMap[lbl] = isValueTrue(val);
+              }
+            }
+          }
+        } else {
+          // Split by comma or semicolon (preserves multi-word values like "Tidak Tepat")
+          const parts = cleanKunci.split(/[,;\n\r]+/).map(s => s.trim()).filter(Boolean);
+          const labels = ['A', 'B', 'C', 'D', 'E'];
+          parts.forEach((part, idx) => {
+            if (idx < labels.length) {
+              correctnessMap[labels[idx]] = isValueTrue(part);
+            }
+          });
+        }
+
+        for (const choice of choicesRaw) {
+          const isCorrect = correctnessMap[choice.label] === true;
+          await client.query(
+            `INSERT INTO tka_answer_choices (question_id, label, content, is_correct, explanation)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [questionId, choice.label, choice.content, isCorrect, pembahasan || '']
+          );
+        }
+      } else {
+        for (const choice of choicesRaw) {
+          const isCorrect = cleanKunci.includes(choice.label);
+          await client.query(
+            `INSERT INTO tka_answer_choices (question_id, label, content, is_correct, explanation)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [questionId, choice.label, choice.content, isCorrect, pembahasan || '']
+          );
+        }
       }
 
       importedCount++;

@@ -117,7 +117,7 @@ router.get("/", verifyToken, async (req, res, next) => {
     }
 
     let query =
-      "SELECT id, subject_id, topic_id, content, image_url, image_position, difficulty, source, display_order, tryout_package_id, question_type, stimulus, workflow_status, review_note, created_at FROM questions WHERE 1=1";
+      "SELECT id, subject_id, topic_id, content, image_url, image_position, difficulty, source, display_order, tryout_package_id, question_type, options_config, stimulus, workflow_status, review_note, created_at FROM questions WHERE 1=1";
     const values = [];
 
     // Filter out completed questions by content_hash if exclude_completed is true
@@ -261,6 +261,7 @@ router.post("/", verifyToken, verifyAdmin, async (req, res, next) => {
       image_url,
       image_position,
       question_type,
+      options_config,
       correct_answer_text,
       stimulus,
       tryout_package_id,
@@ -301,7 +302,7 @@ router.post("/", verifyToken, verifyAdmin, async (req, res, next) => {
     const nextDisplayOrder = (maxOrderRes.rows[0]?.max_order || 0) + 1;
 
     const qRes = await client.query(
-      "INSERT INTO questions (subject_id, topic_id, content, difficulty, display_order, image_url, image_position, question_type, content_hash, stimulus, tryout_package_id, workflow_status, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *",
+      "INSERT INTO questions (subject_id, topic_id, content, difficulty, display_order, image_url, image_position, question_type, options_config, content_hash, stimulus, tryout_package_id, workflow_status, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *",
       [
         subject_id,
         topic_id || null,
@@ -311,6 +312,7 @@ router.post("/", verifyToken, verifyAdmin, async (req, res, next) => {
         image_url || null,
         image_position || "after",
         qType,
+        JSON.stringify(options_config || {}),
         hash,
         stimulus || null,
         tryout_package_id || null,
@@ -572,6 +574,7 @@ router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
       image_position,
       stimulus,
       question_type,
+      options_config,
       choices,
       correct_answer_text,
     } = req.body;
@@ -609,6 +612,11 @@ router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
       paramCount++;
       updates.push(`question_type = $${paramCount}`);
       values.push(question_type);
+    }
+    if (options_config !== undefined) {
+      paramCount++;
+      updates.push(`options_config = $${paramCount}`);
+      values.push(JSON.stringify(options_config || {}));
     }
 
     if (updates.length > 0) {

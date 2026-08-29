@@ -183,6 +183,20 @@ router.post("/latihan/submit", verifyToken, async (req, res, next) => {
           const studentAns = userAnswersObj[c.label];
           return studentAns !== undefined && studentAns === (c.is_correct === true);
         });
+      } else if (questionType === "complex_mc_multi") {
+        let userSelected = [];
+        try {
+          userSelected = chosenId ? (typeof chosenId === "string" ? JSON.parse(chosenId) : chosenId) : [];
+          if (!Array.isArray(userSelected)) userSelected = [];
+        } catch (e) {}
+        const correctLabels = dbChoices.filter(c => c.is_correct).map(c => c.label);
+        const selectedNormalized = userSelected.map(s => {
+          const matched = dbChoices.find(c => c.id === s);
+          return matched ? matched.label : String(s).toUpperCase().trim();
+        });
+        const correctSet = new Set(correctLabels);
+        const userSet = new Set(selectedNormalized);
+        isCorrect = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every(item => userSet.has(item));
       } else {
         const chosenChoice = chosenId
           ? dbChoices.find((c) => c.id === chosenId)
@@ -191,8 +205,10 @@ router.post("/latihan/submit", verifyToken, async (req, res, next) => {
       }
 
       return {
-        chosen_choice_id: (questionType === "short_answer" || questionType === "complex_mc_tf") ? null : chosenId,
-        answer_text: (questionType === "short_answer" || questionType === "complex_mc_tf") ? chosenId : null,
+        chosen_choice_id: (questionType === "short_answer" || questionType === "complex_mc_tf" || questionType === "complex_mc_multi") ? null : chosenId,
+        answer_text: (questionType === "short_answer" || questionType === "complex_mc_tf" || questionType === "complex_mc_multi")
+          ? (typeof chosenId === "object" ? JSON.stringify(chosenId) : chosenId)
+          : null,
         is_correct: isCorrect,
         question_id: q.id,
         question_type: questionType,
@@ -218,9 +234,9 @@ router.post("/latihan/submit", verifyToken, async (req, res, next) => {
 
       const correctCount = irtAnswers.filter((a) => a.is_correct).length;
       const unansweredCount = irtAnswers.filter((a) => {
-        const isTextBased = a.question_type === "short_answer" || a.question_type === "complex_mc_tf";
+        const isTextBased = a.question_type === "short_answer" || a.question_type === "complex_mc_tf" || a.question_type === "complex_mc_multi";
         return isTextBased
-          ? (!a.answer_text || String(a.answer_text).trim() === '')
+          ? (!a.answer_text || String(a.answer_text).trim() === '' || String(a.answer_text) === '[]' || String(a.answer_text) === '{}')
           : !a.chosen_choice_id;
       }).length;
       const incorrectCount = totalQuestions - correctCount - unansweredCount;
@@ -1220,6 +1236,7 @@ router.get(
 
       const questions = questionsRes.rows.map((q) => ({
         ...q,
+        options_config: q.options_config || {},
         choices: q.choices.filter((c) => c.id !== null),
       }));
 
@@ -1236,6 +1253,11 @@ router.get(
           ? q.choices.find((c) => c.id === chosenChoiceId)
           : null;
         const correctChoice = q.choices.find((c) => c.is_correct) || null;
+        const isMulti = q.question_type === "complex_mc_multi";
+        const isAnswered = (q.question_type === "short_answer" || q.question_type === "complex_mc_tf" || isMulti)
+          ? (!!answerText && String(answerText).trim() !== '' && String(answerText) !== '[]' && String(answerText) !== '{}')
+          : !!chosenChoiceId;
+
         return {
           ...q,
           chosenChoiceId,
@@ -1243,7 +1265,7 @@ router.get(
           chosenChoice: chosenChoice || null,
           correctChoice,
           isCorrect: analysis.isCorrect === true,
-          isAnswered: (q.question_type === "short_answer" || q.question_type === "complex_mc_tf") ? !!answerText : !!chosenChoiceId,
+          isAnswered: isAnswered,
           difficulty: analysis.difficulty || q.difficulty || "medium",
           irtStats: itemStatsMap[q.id] || null,
         };

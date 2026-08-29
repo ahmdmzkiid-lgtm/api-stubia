@@ -150,6 +150,26 @@ async function autoSubmitSession(dbOrPool, sessionId, userId) {
           const studentAns = userAnswersObj[c.label];
           return studentAns !== undefined && studentAns === c.is_correct;
         });
+      } else if (ans.question_type === "complex_mc_multi") {
+        const choicesRes = await dbOrPool.query(
+          `SELECT id, label, is_correct FROM answer_choices WHERE question_id = $1`,
+          [ans.question_id]
+        );
+        let userSelected = [];
+        try {
+          userSelected = ans.answer_text ? (typeof ans.answer_text === 'string' ? JSON.parse(ans.answer_text) : ans.answer_text) : [];
+          if (!Array.isArray(userSelected)) userSelected = [];
+        } catch (e) {
+          userSelected = [];
+        }
+        const correctLabels = choicesRes.rows.filter(c => c.is_correct).map(c => c.label);
+        const selectedNormalized = userSelected.map(s => {
+          const matched = choicesRes.rows.find(c => c.id === s);
+          return matched ? matched.label : String(s).toUpperCase().trim();
+        });
+        const correctSet = new Set(correctLabels);
+        const userSet = new Set(selectedNormalized);
+        ans.is_correct = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every(item => userSet.has(item));
       }
     }
 
@@ -1294,7 +1314,7 @@ router.get(
       // Include saved user answers for state restoration (handles localStorage loss)
       const result = await pool.query(
         `
-      SELECT q.id, q.content, q.image_url, q.image_position, q.difficulty, q.question_type, q.stimulus,
+      SELECT q.id, q.content, q.image_url, q.image_position, q.difficulty, q.question_type, q.options_config, q.stimulus,
              s.name as subject_name, s.id as subject_id, ua.position,
              ua.chosen_choice_id, ua.is_flagged, ua.answer_text
       FROM user_answers ua
@@ -1731,6 +1751,7 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
           q.image_position,
           q.difficulty,
           q.question_type,
+          q.options_config,
           q.stimulus,
           COALESCE(s.name, 'Unknown') as subject_name,
           ua.chosen_choice_id,
@@ -1771,10 +1792,11 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
 
         const isShortAnswer = q.question_type === "short_answer";
         const isComplex = q.question_type === "complex_mc_tf";
+        const isMulti = q.question_type === "complex_mc_multi";
 
         // Find user's answer label
         let userAnswerLabel = null;
-        if (isShortAnswer || isComplex) {
+        if (isShortAnswer || isComplex || isMulti) {
           userAnswerLabel = q.answer_text || null;
         } else if (q.chosen_choice_id) {
           const chosenChoice = choices.find((c) => c.id === q.chosen_choice_id);
@@ -1793,6 +1815,10 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
           });
           correctAnswerLabel = JSON.stringify(correctObj);
           questionExplanation = choices.find((c) => c.explanation)?.explanation || null;
+        } else if (isMulti) {
+          const correctLabels = choices.filter((c) => c.is_correct === true).map((c) => c.label);
+          correctAnswerLabel = JSON.stringify(correctLabels);
+          questionExplanation = choices.find((c) => c.is_correct && c.explanation)?.explanation || choices.find((c) => c.explanation)?.explanation || null;
         } else {
           const correctChoice = choices.find((c) => c.is_correct === true);
           if (correctChoice) {
@@ -1822,6 +1848,20 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
             const studentAns = userAnswersObj[c.label];
             return studentAns !== undefined && studentAns === c.is_correct;
           });
+        } else if (isMulti) {
+          let userSelected = [];
+          try {
+            userSelected = q.answer_text ? (typeof q.answer_text === 'string' ? JSON.parse(q.answer_text) : q.answer_text) : [];
+            if (!Array.isArray(userSelected)) userSelected = [];
+          } catch (e) {}
+          const correctLabels = choices.filter((c) => c.is_correct).map((c) => c.label);
+          const selectedNormalized = userSelected.map((s) => {
+            const matched = choices.find((c) => c.id === s);
+            return matched ? matched.label : String(s).toUpperCase().trim();
+          });
+          const correctSet = new Set(correctLabels);
+          const userSet = new Set(selectedNormalized);
+          isCorrect = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every((item) => userSet.has(item));
         } else {
           isCorrect = q.chosen_choice_id
             ? choices.find((c) => c.id === q.chosen_choice_id)?.is_correct ===
@@ -1837,6 +1877,7 @@ router.get("/result/:sessionId", verifyToken, async (req, res, next) => {
           image_position: q.image_position,
           difficulty: q.difficulty,
           question_type: q.question_type || "multiple_choice",
+          options_config: q.options_config || {},
           subject: q.subject_name,
           isCorrect: isCorrect,
           isFlagged: q.is_flagged,
@@ -2281,6 +2322,7 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
         q.image_position,
         q.difficulty,
         q.question_type,
+        q.options_config,
         q.stimulus,
         COALESCE(s.name, 'Unknown') as subject_name,
         ua.chosen_choice_id,
@@ -2319,9 +2361,10 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
 
       const isShortAnswer = q.question_type === "short_answer";
       const isComplex = q.question_type === "complex_mc_tf";
+      const isMulti = q.question_type === "complex_mc_multi";
 
       let userAnswerLabel = null;
-      if (isShortAnswer || isComplex) {
+      if (isShortAnswer || isComplex || isMulti) {
         userAnswerLabel = q.answer_text || null;
       } else if (q.chosen_choice_id) {
         const chosenChoice = choices.find((c) => c.id === q.chosen_choice_id);
@@ -2337,6 +2380,10 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
         });
         correctAnswerLabel = JSON.stringify(correctObj);
         questionExplanation = choices.find((c) => c.explanation)?.explanation || null;
+      } else if (isMulti) {
+        const correctLabels = choices.filter((c) => c.is_correct === true).map((c) => c.label);
+        correctAnswerLabel = JSON.stringify(correctLabels);
+        questionExplanation = choices.find((c) => c.is_correct && c.explanation)?.explanation || choices.find((c) => c.explanation)?.explanation || null;
       } else {
         const correctChoice = choices.find((c) => c.is_correct === true);
         if (correctChoice) {
@@ -2365,6 +2412,20 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
           const studentAns = userAnswersObj[c.label];
           return studentAns !== undefined && studentAns === c.is_correct;
         });
+      } else if (isMulti) {
+        let userSelected = [];
+        try {
+          userSelected = q.answer_text ? (typeof q.answer_text === 'string' ? JSON.parse(q.answer_text) : q.answer_text) : [];
+          if (!Array.isArray(userSelected)) userSelected = [];
+        } catch (e) {}
+        const correctLabels = choices.filter((c) => c.is_correct).map((c) => c.label);
+        const selectedNormalized = userSelected.map((s) => {
+          const matched = choices.find((c) => c.id === s);
+          return matched ? matched.label : String(s).toUpperCase().trim();
+        });
+        const correctSet = new Set(correctLabels);
+        const userSet = new Set(selectedNormalized);
+        isCorrect = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every((item) => userSet.has(item));
       } else {
         isCorrect = q.chosen_choice_id
           ? choices.find((c) => c.id === q.chosen_choice_id)?.is_correct ===
@@ -2380,6 +2441,7 @@ router.post("/result/combined", verifyToken, async (req, res, next) => {
         image_position: q.image_position,
         difficulty: q.difficulty,
         question_type: q.question_type || "multiple_choice",
+        options_config: q.options_config || {},
         subject: q.subject_name,
         isCorrect: isCorrect,
         isFlagged: q.is_flagged,
@@ -2804,6 +2866,24 @@ router.post("/submit", verifyToken, async (req, res, next) => {
           const studentAns = userAnswersObj[c.label];
           return studentAns !== undefined && studentAns === c.is_correct;
         });
+      } else if (ans.question_type === "complex_mc_multi") {
+        const choicesRes = await pool.query(
+          `SELECT id, label, is_correct FROM answer_choices WHERE question_id = $1`,
+          [ans.question_id],
+        );
+        let userSelected = [];
+        try {
+          userSelected = ans.answer_text ? (typeof ans.answer_text === 'string' ? JSON.parse(ans.answer_text) : ans.answer_text) : [];
+          if (!Array.isArray(userSelected)) userSelected = [];
+        } catch (e) {}
+        const correctLabels = choicesRes.rows.filter(c => c.is_correct).map(c => c.label);
+        const selectedNormalized = userSelected.map(s => {
+          const matched = choicesRes.rows.find(c => c.id === s);
+          return matched ? matched.label : String(s).toUpperCase().trim();
+        });
+        const correctSet = new Set(correctLabels);
+        const userSet = new Set(selectedNormalized);
+        ans.is_correct = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every(item => userSet.has(item));
       }
     }
 
@@ -3038,6 +3118,24 @@ router.post("/submit-bulk", verifyToken, async (req, res, next) => {
             const studentAns = userAnswersObj[c.label];
             return studentAns !== undefined && studentAns === c.is_correct;
           });
+        } else if (ans.question_type === "complex_mc_multi") {
+          const choicesRes = await pool.query(
+            `SELECT id, label, is_correct FROM answer_choices WHERE question_id = $1`,
+            [ans.question_id],
+          );
+          let userSelected = [];
+          try {
+            userSelected = ans.answer_text ? (typeof ans.answer_text === 'string' ? JSON.parse(ans.answer_text) : ans.answer_text) : [];
+            if (!Array.isArray(userSelected)) userSelected = [];
+          } catch (e) {}
+          const correctLabels = choicesRes.rows.filter(c => c.is_correct).map(c => c.label);
+          const selectedNormalized = userSelected.map(s => {
+            const matched = choicesRes.rows.find(c => c.id === s);
+            return matched ? matched.label : String(s).toUpperCase().trim();
+          });
+          const correctSet = new Set(correctLabels);
+          const userSet = new Set(selectedNormalized);
+          ans.is_correct = correctSet.size > 0 && correctSet.size === userSet.size && [...correctSet].every(item => userSet.has(item));
         }
       }
 
