@@ -310,7 +310,8 @@ router.get('/latihan/questions', verifyToken, async (req, res, next) => {
     let query = `
       SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position,
              q.difficulty, q.question_type, q.options_config, q.display_order, q.package_number,
-             t.title as topic_title, s.name as subject_name
+             t.title as topic_title, s.name as subject_name,
+             COALESCE(s.duration_minutes, 30) as duration_minutes
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
       LEFT JOIN tka_topics t ON q.topic_id = t.id
@@ -739,6 +740,8 @@ router.get('/tryout/session/:sessionId/questions', verifyToken, async (req, res,
     let query = `
       SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position,
              q.difficulty, q.question_type, q.options_config, q.display_order, s.name as subject_name,
+             s.group_category,
+             COALESCE(s.duration_minutes, CASE WHEN s.group_category = 'wajib' THEN 75 ELSE 60 END) as duration_minutes,
              ua.chosen_choice_id, ua.answer_text, ua.is_flagged
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
@@ -808,6 +811,45 @@ router.post('/tryout/submit-answer', verifyToken, async (req, res, next) => {
     );
 
     res.json({ success: true, message: 'Jawaban tersimpan' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tka/tryout/submit-subtest
+router.post('/tryout/submit-subtest', verifyToken, async (req, res, next) => {
+  try {
+    const { session_id, subject_id } = req.body;
+    if (!session_id || !subject_id) {
+      return res.status(400).json({ success: false, error: 'session_id dan subject_id wajib diisi' });
+    }
+
+    const sRes = await pool.query(
+      `SELECT * FROM tka_tryout_sessions WHERE id = $1 AND user_id = $2`,
+      [session_id, req.user.id]
+    );
+    if (sRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sesi tryout tidak ditemukan' });
+    }
+
+    let currentCompleted = [];
+    try {
+      const raw = sRes.rows[0].completed_subtests;
+      currentCompleted = Array.isArray(raw) ? raw : (typeof raw === 'string' ? JSON.parse(raw || '[]') : []);
+      if (!Array.isArray(currentCompleted)) currentCompleted = [];
+    } catch (e) {
+      currentCompleted = [];
+    }
+
+    if (!currentCompleted.includes(subject_id)) {
+      currentCompleted.push(subject_id);
+      await pool.query(
+        `UPDATE tka_tryout_sessions SET completed_subtests = $1 WHERE id = $2`,
+        [JSON.stringify(currentCompleted), session_id]
+      );
+    }
+
+    res.json({ success: true, message: 'Subtes berhasil diselesaikan', completed_subtests: currentCompleted });
   } catch (err) {
     next(err);
   }
