@@ -767,6 +767,15 @@ router.get(
         if (sessionTargetRes.rows.length > 0) {
           target_ptn = sessionTargetRes.rows[0].target_ptn;
           target_major = sessionTargetRes.rows[0].target_major;
+        } else {
+          const userTargetRes = await pool.query(
+            "SELECT target_ptn, target_major FROM users WHERE id = $1 AND target_ptn IS NOT NULL LIMIT 1",
+            [req.user.id]
+          );
+          if (userTargetRes.rows.length > 0) {
+            target_ptn = userTargetRes.rows[0].target_ptn;
+            target_major = userTargetRes.rows[0].target_major;
+          }
         }
 
         attemptInfo = await getUtbkPackageAttemptInfo(pool, req.user.id, packageId);
@@ -1193,7 +1202,23 @@ router.post("/start", verifyToken, async (req, res, next) => {
       if (existingTargetRes.rows.length > 0) {
         finalPtn = existingTargetRes.rows[0].target_ptn;
         finalMajor = existingTargetRes.rows[0].target_major;
+      } else {
+        const userTargetRes = await client.query(
+          "SELECT target_ptn, target_major FROM users WHERE id = $1 AND target_ptn IS NOT NULL LIMIT 1",
+          [req.user.id]
+        );
+        if (userTargetRes.rows.length > 0) {
+          finalPtn = userTargetRes.rows[0].target_ptn;
+          finalMajor = userTargetRes.rows[0].target_major;
+        }
       }
+    }
+
+    if (finalPtn && finalMajor) {
+      client.query(
+        "UPDATE users SET target_ptn = COALESCE(target_ptn, $1), target_major = COALESCE(target_major, $2) WHERE id = $3",
+        [finalPtn, finalMajor, req.user.id]
+      ).catch(e => console.error('Failed to auto-update user target PTN in profile:', e.message));
     }
 
     // Create Session
