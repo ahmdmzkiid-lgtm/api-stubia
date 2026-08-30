@@ -174,10 +174,10 @@ router.get('/stats', verifyToken, verifyAdmin, async (req, res, next) => {
           COUNT(*) FILTER (WHERE role = 'admin') as admins,
           COUNT(*) FILTER (WHERE role = 'mitra') as mitra,
           COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'gratis' OR current_plan IS NULL)) as free_students,
-          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium' OR current_plan LIKE 'utbk_%')) as premium_utbk,
-          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_um' OR current_plan LIKE 'um_%')) as premium_um,
-          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_tka' OR current_plan LIKE 'tka_%')) as premium_tka,
-          COUNT(*) FILTER (WHERE role = 'student' AND current_plan LIKE 'cpns_%') as premium_skd
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan IN ('premium', 'sultan') OR current_plan LIKE 'utbk_%')) as premium_utbk,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan IN ('premium_um', 'sultan') OR current_plan LIKE 'um_%')) as premium_um,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan IN ('premium_tka', 'sultan') OR current_plan LIKE 'tka_%')) as premium_tka,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan IN ('premium_skd', 'sultan') OR current_plan LIKE 'cpns_%' OR current_plan LIKE 'skd_%')) as premium_skd
         FROM users
       `),
 
@@ -358,6 +358,10 @@ router.get('/stats', verifyToken, verifyAdmin, async (req, res, next) => {
           premiumUm: parseInt(usersData.premium_um || 0),
           premiumTka: parseInt(usersData.premium_tka || 0),
           premiumSkd: parseInt(usersData.premium_skd || 0),
+          premiumStudents: parseInt(usersData.premium_utbk || 0),
+          premiumUmStudents: parseInt(usersData.premium_um || 0),
+          premiumTkaStudents: parseInt(usersData.premium_tka || 0),
+          premiumSkdStudents: parseInt(usersData.premium_skd || 0),
           growth: {
             today: parseInt(growthData.new_today || 0),
             thisWeek: parseInt(growthData.new_this_week || 0),
@@ -452,12 +456,16 @@ router.get('/users', verifyToken, verifyAdmin, async (req, res, next) => {
       conditions.push(`role = $${params.length}`);
     }
     if (plan) {
-      if (plan === 'premium') {
-        conditions.push(`(current_plan = 'premium' OR current_plan LIKE 'utbk_%')`);
-      } else if (plan === 'premium_um') {
-        conditions.push(`(current_plan = 'premium_um' OR current_plan LIKE 'um_%')`);
-      } else if (plan === 'cpns') {
-        conditions.push(`current_plan LIKE 'cpns_%'`);
+      if (plan === 'premium' || plan === 'utbk') {
+        conditions.push(`(current_plan IN ('premium', 'sultan') OR current_plan LIKE 'utbk_%')`);
+      } else if (plan === 'premium_um' || plan === 'um') {
+        conditions.push(`(current_plan IN ('premium_um', 'sultan') OR current_plan LIKE 'um_%')`);
+      } else if (plan === 'premium_tka' || plan === 'tka') {
+        conditions.push(`(current_plan IN ('premium_tka', 'sultan') OR current_plan LIKE 'tka_%')`);
+      } else if (plan === 'premium_skd' || plan === 'cpns' || plan === 'skd') {
+        conditions.push(`(current_plan IN ('premium_skd', 'sultan') OR current_plan LIKE 'cpns_%' OR current_plan LIKE 'skd_%')`);
+      } else if (plan === 'gratis' || plan === 'free') {
+        conditions.push(`(current_plan = 'gratis' OR current_plan IS NULL)`);
       } else {
         params.push(plan);
         conditions.push(`current_plan = $${params.length}`);
