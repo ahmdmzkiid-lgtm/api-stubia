@@ -145,26 +145,124 @@ const fetchRecentActivities = async (limit = 50, offset = 0) => {
   return { items, total };
 };
 
-// GET /api/admin/stats - Dashboard statistics
+// GET /api/admin/stats - Comprehensive Dashboard & Operational statistics
 router.get('/stats', verifyToken, verifyAdmin, async (req, res, next) => {
   try {
-    // Run all queries in parallel for performance
+    // Run all queries in parallel for high performance
     const [
       usersResult,
+      usersGrowthResult,
+      revenueResult,
+      activeSubsResult,
       questionsResult,
-      sessionsResult,
+      sessionsSummaryResult,
+      liveSessionsResult,
+      pendingActionsResult,
       subjectStatsResult,
       difficultyResult,
       recentUsersResult,
-      recentQuestionsResult,
+      recentTxResult,
+      regTrendResult,
+      sessionTrendResult,
+      revenueTrendResult,
     ] = await Promise.all([
-      // Total users
-      pool.query("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE role = 'student') as students, COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium' OR current_plan LIKE 'utbk_%')) as premium_students, COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_um' OR current_plan LIKE 'um_%')) as premium_um_students, COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_tka' OR current_plan LIKE 'tka_%')) as premium_tka_students, COUNT(*) FILTER (WHERE role = 'admin') as admins FROM users"),
-      // Total questions
-      pool.query("SELECT COUNT(*) as total FROM questions"),
-      // Tryout sessions
-      pool.query("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE submitted_at IS NOT NULL) as completed FROM tryout_sessions"),
-      // Questions per subject
+      // 1. Total users by role & plan
+      pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE role = 'student') as students,
+          COUNT(*) FILTER (WHERE role = 'admin') as admins,
+          COUNT(*) FILTER (WHERE role = 'mitra') as mitra,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'gratis' OR current_plan IS NULL)) as free_students,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium' OR current_plan LIKE 'utbk_%')) as premium_utbk,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_um' OR current_plan LIKE 'um_%')) as premium_um,
+          COUNT(*) FILTER (WHERE role = 'student' AND (current_plan = 'premium_tka' OR current_plan LIKE 'tka_%')) as premium_tka,
+          COUNT(*) FILTER (WHERE role = 'student' AND current_plan LIKE 'cpns_%') as premium_skd
+        FROM users
+      `),
+
+      // 2. User growth (today, 7 days, 30 days)
+      pool.query(`
+        SELECT 
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') as new_today,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as new_this_week,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') as new_this_month
+        FROM users
+      `),
+
+      // 3. Transactions & Revenue
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_tx,
+          COUNT(*) FILTER (WHERE status IN ('settlement', 'capture', 'success')) as success_tx,
+          COUNT(*) FILTER (WHERE status = 'pending') as pending_tx,
+          COUNT(*) FILTER (WHERE status IN ('expire', 'cancel', 'deny', 'failure')) as failed_tx,
+          COALESCE(SUM(amount) FILTER (WHERE status IN ('settlement', 'capture', 'success')), 0) as total_revenue,
+          COALESCE(SUM(amount) FILTER (WHERE status IN ('settlement', 'capture', 'success') AND created_at >= NOW() - INTERVAL '30 days'), 0) as month_revenue,
+          COALESCE(SUM(amount) FILTER (WHERE status IN ('settlement', 'capture', 'success') AND created_at >= NOW() - INTERVAL '24 hours'), 0) as today_revenue
+        FROM payment_transactions
+      `),
+
+      // 4. Active Subscriptions
+      pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'active' AND (expires_at IS NULL OR expires_at > NOW())) as active_subs
+        FROM subscriptions
+      `),
+
+      // 5. Total Questions across all tables
+      pool.query(`
+        SELECT 
+          (SELECT COUNT(*) FROM questions) as utbk,
+          (SELECT COUNT(*) FROM um_questions) as um,
+          (SELECT COUNT(*) FROM skd_questions) as skd,
+          (SELECT COUNT(*) FROM tka_questions) as tka,
+          (SELECT COUNT(*) FROM fundamental_quizzes) as fundamental_quizzes,
+          (SELECT COUNT(*) FROM fundamental_materials) as fundamental_materials,
+          (
+            (SELECT COUNT(*) FROM questions) + 
+            (SELECT COUNT(*) FROM um_questions) + 
+            (SELECT COUNT(*) FROM skd_questions) + 
+            (SELECT COUNT(*) FROM tka_questions) +
+            (SELECT COUNT(*) FROM fundamental_quizzes)
+          ) as total_questions
+      `),
+
+      // 6. Total Completed Sessions across all modules
+      pool.query(`
+        SELECT 
+          (SELECT COUNT(*) FROM tryout_sessions WHERE submitted_at IS NOT NULL) as utbk_tryouts,
+          (SELECT COUNT(*) FROM um_tryout_sessions WHERE submitted_at IS NOT NULL) as um_tryouts,
+          (SELECT COUNT(*) FROM skd_tryout_sessions WHERE submitted_at IS NOT NULL) as skd_tryouts,
+          (SELECT COUNT(*) FROM tka_tryout_sessions WHERE submitted_at IS NOT NULL) as tka_tryouts,
+          (SELECT COUNT(*) FROM latihan_sessions WHERE submitted_at IS NOT NULL) as utbk_latihan,
+          (SELECT COUNT(*) FROM skd_latihan_sessions WHERE submitted_at IS NOT NULL) as skd_latihan,
+          (SELECT COUNT(*) FROM tka_latihan_sessions WHERE submitted_at IS NOT NULL) as tka_latihan,
+          (SELECT COUNT(*) FROM fundamental_quiz_sessions) as fundamental_quizzes,
+          (SELECT COUNT(*) FROM battle_matches WHERE status = 'completed') as battle_matches
+      `),
+
+      // 7. Live Ongoing Sessions (active in last 3 hours without submitted_at)
+      pool.query(`
+        SELECT 
+          (SELECT COUNT(*) FROM tryout_sessions WHERE submitted_at IS NULL AND started_at >= NOW() - INTERVAL '3 hours') as live_utbk_tryout,
+          (SELECT COUNT(*) FROM um_tryout_sessions WHERE submitted_at IS NULL AND started_at >= NOW() - INTERVAL '3 hours') as live_um_tryout,
+          (SELECT COUNT(*) FROM tka_tryout_sessions WHERE submitted_at IS NULL AND started_at >= NOW() - INTERVAL '3 hours') as live_tka_tryout,
+          (SELECT COUNT(*) FROM skd_tryout_sessions WHERE submitted_at IS NULL AND started_at >= NOW() - INTERVAL '3 hours') as live_skd_tryout,
+          (SELECT COUNT(*) FROM latihan_sessions WHERE submitted_at IS NULL AND started_at >= NOW() - INTERVAL '2 hours') as live_latihan,
+          (SELECT COUNT(*) FROM battle_matches WHERE status IN ('waiting', 'matched', 'ongoing')) as live_battles
+      `),
+
+      // 8. Pending Actions
+      pool.query(`
+        SELECT 
+          (SELECT COUNT(*) FROM tryout_registrations WHERE status = 'pending') as pending_tryout_registrations,
+          (SELECT COUNT(*) FROM user_social_verifications WHERE status = 'pending') as pending_social_verifications,
+          (SELECT COUNT(*) FROM mitra_withdrawals WHERE status = 'pending') as pending_mitra_withdrawals
+      `),
+
+      // 9. Subject stats (UTBK)
       pool.query(`
         SELECT s.name, s.category, COUNT(q.id) as question_count 
         FROM subjects s 
@@ -172,41 +270,162 @@ router.get('/stats', verifyToken, verifyAdmin, async (req, res, next) => {
         GROUP BY s.id, s.name, s.category 
         ORDER BY question_count DESC
       `),
-      // Difficulty distribution
-      pool.query("SELECT difficulty, COUNT(*) as count FROM questions GROUP BY difficulty"),
-      // Recent users (last 10)
-      pool.query("SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC LIMIT 10"),
-      // Recent questions (last 5)
+
+      // 10. Difficulty distribution (UTBK)
+      pool.query(`SELECT difficulty, COUNT(*) as count FROM questions GROUP BY difficulty`),
+
+      // 11. Recent users (last 8)
       pool.query(`
-        SELECT q.id, q.content, q.difficulty, q.source, q.created_at, s.name as subject_name 
-        FROM questions q 
-        LEFT JOIN subjects s ON s.id = q.subject_id 
-        ORDER BY q.created_at DESC LIMIT 5
+        SELECT id, name, email, role, current_plan, created_at 
+        FROM users 
+        ORDER BY created_at DESC 
+        LIMIT 8
+      `),
+
+      // 12. Recent payment transactions (last 8)
+      pool.query(`
+        SELECT pt.*,
+               u.name as user_name, u.email as user_email
+        FROM payment_transactions pt
+        LEFT JOIN users u ON u.id = pt.user_id
+        ORDER BY pt.created_at DESC
+        LIMIT 8
+      `),
+
+      // 13. Registration trend (14 days)
+      pool.query(`
+        SELECT 
+          TO_CHAR(d.day, 'YYYY-MM-DD') as date,
+          COUNT(u.id) as count
+        FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, INTERVAL '1 day') AS d(day)
+        LEFT JOIN users u ON DATE(u.created_at) = DATE(d.day)
+        GROUP BY d.day
+        ORDER BY d.day ASC
+      `),
+
+      // 14. Session trend (14 days - aggregate latihan + tryouts)
+      pool.query(`
+        SELECT 
+          TO_CHAR(d.day, 'YYYY-MM-DD') as date,
+          (
+            COALESCE((SELECT COUNT(*) FROM latihan_sessions ls WHERE DATE(ls.started_at) = DATE(d.day)), 0) +
+            COALESCE((SELECT COUNT(*) FROM tryout_sessions ts WHERE DATE(ts.started_at) = DATE(d.day)), 0) +
+            COALESCE((SELECT COUNT(*) FROM um_tryout_sessions ums WHERE DATE(ums.started_at) = DATE(d.day)), 0)
+          ) as count
+        FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, INTERVAL '1 day') AS d(day)
+        GROUP BY d.day
+        ORDER BY d.day ASC
+      `),
+
+      // 15. Revenue trend (14 days)
+      pool.query(`
+        SELECT 
+          TO_CHAR(d.day, 'YYYY-MM-DD') as date,
+          COALESCE(SUM(pt.amount) FILTER (WHERE pt.status IN ('settlement', 'capture', 'success')), 0) as amount
+        FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, INTERVAL '1 day') AS d(day)
+        LEFT JOIN payment_transactions pt ON DATE(pt.created_at) = DATE(d.day)
+        GROUP BY d.day
+        ORDER BY d.day ASC
       `),
     ]);
+
+    let aiKeyStatus = null;
+    try {
+      aiKeyStatus = getApiKeyManager().getKeyStatus();
+    } catch (e) {
+      aiKeyStatus = { error: e.message };
+    }
+
+    const usersData = usersResult.rows[0] || {};
+    const growthData = usersGrowthResult.rows[0] || {};
+    const revData = revenueResult.rows[0] || {};
+    const subsData = activeSubsResult.rows[0] || {};
+    const qData = questionsResult.rows[0] || {};
+    const sessData = sessionsSummaryResult.rows[0] || {};
+    const liveData = liveSessionsResult.rows[0] || {};
+    const pendingData = pendingActionsResult.rows[0] || {};
 
     res.json({
       success: true,
       data: {
         users: {
-          total: parseInt(usersResult.rows[0].total),
-          students: parseInt(usersResult.rows[0].students),
-          premiumStudents: parseInt(usersResult.rows[0].premium_students),
-          premiumUmStudents: parseInt(usersResult.rows[0].premium_um_students || 0),
-          premiumTkaStudents: parseInt(usersResult.rows[0].premium_tka_students || 0),
-          admins: parseInt(usersResult.rows[0].admins),
+          total: parseInt(usersData.total || 0),
+          students: parseInt(usersData.students || 0),
+          admins: parseInt(usersData.admins || 0),
+          mitra: parseInt(usersData.mitra || 0),
+          freeStudents: parseInt(usersData.free_students || 0),
+          premiumUtbk: parseInt(usersData.premium_utbk || 0),
+          premiumUm: parseInt(usersData.premium_um || 0),
+          premiumTka: parseInt(usersData.premium_tka || 0),
+          premiumSkd: parseInt(usersData.premium_skd || 0),
+          growth: {
+            today: parseInt(growthData.new_today || 0),
+            thisWeek: parseInt(growthData.new_this_week || 0),
+            thisMonth: parseInt(growthData.new_this_month || 0),
+          }
+        },
+        financials: {
+          totalRevenue: parseInt(revData.total_revenue || 0),
+          monthRevenue: parseInt(revData.month_revenue || 0),
+          todayRevenue: parseInt(revData.today_revenue || 0),
+          totalTx: parseInt(revData.total_tx || 0),
+          successTx: parseInt(revData.success_tx || 0),
+          pendingTx: parseInt(revData.pending_tx || 0),
+          failedTx: parseInt(revData.failed_tx || 0),
+          activeSubscriptions: parseInt(subsData.active_subs || 0),
+          totalSubscriptions: parseInt(subsData.total || 0),
         },
         questions: {
-          total: parseInt(questionsResult.rows[0].total),
+          total: parseInt(qData.total_questions || 0),
+          utbk: parseInt(qData.utbk || 0),
+          um: parseInt(qData.um || 0),
+          skd: parseInt(qData.skd || 0),
+          tka: parseInt(qData.tka || 0),
+          fundamentalQuizzes: parseInt(qData.fundamental_quizzes || 0),
+          fundamentalMaterials: parseInt(qData.fundamental_materials || 0),
         },
         sessions: {
-          total: parseInt(sessionsResult.rows[0].total),
-          completed: parseInt(sessionsResult.rows[0].completed),
+          total: parseInt(sessData.utbk_tryouts || 0) + parseInt(sessData.um_tryouts || 0) + parseInt(sessData.skd_tryouts || 0) + parseInt(sessData.tka_tryouts || 0) + parseInt(sessData.utbk_latihan || 0) + parseInt(sessData.skd_latihan || 0) + parseInt(sessData.tka_latihan || 0) + parseInt(sessData.fundamental_quizzes || 0) + parseInt(sessData.battle_matches || 0),
+          utbkTryouts: parseInt(sessData.utbk_tryouts || 0),
+          umTryouts: parseInt(sessData.um_tryouts || 0),
+          skdTryouts: parseInt(sessData.skd_tryouts || 0),
+          tkaTryouts: parseInt(sessData.tka_tryouts || 0),
+          utbkLatihan: parseInt(sessData.utbk_latihan || 0),
+          skdLatihan: parseInt(sessData.skd_latihan || 0),
+          tkaLatihan: parseInt(sessData.tka_latihan || 0),
+          fundamentalQuizzes: parseInt(sessData.fundamental_quizzes || 0),
+          battleMatches: parseInt(sessData.battle_matches || 0),
         },
+        liveSessions: {
+          total: parseInt(liveData.live_utbk_tryout || 0) + parseInt(liveData.live_um_tryout || 0) + parseInt(liveData.live_tka_tryout || 0) + parseInt(liveData.live_skd_tryout || 0) + parseInt(liveData.live_latihan || 0) + parseInt(liveData.live_battles || 0),
+          utbkTryout: parseInt(liveData.live_utbk_tryout || 0),
+          umTryout: parseInt(liveData.live_um_tryout || 0),
+          tkaTryout: parseInt(liveData.live_tka_tryout || 0),
+          skdTryout: parseInt(liveData.live_skd_tryout || 0),
+          latihan: parseInt(liveData.live_latihan || 0),
+          battles: parseInt(liveData.live_battles || 0),
+        },
+        pendingActions: {
+          total: parseInt(pendingData.pending_tryout_registrations || 0) + parseInt(pendingData.pending_social_verifications || 0) + parseInt(pendingData.pending_mitra_withdrawals || 0),
+          tryoutRegistrations: parseInt(pendingData.pending_tryout_registrations || 0),
+          socialVerifications: parseInt(pendingData.pending_social_verifications || 0),
+          mitraWithdrawals: parseInt(pendingData.pending_mitra_withdrawals || 0),
+        },
+        aiKeyStatus,
         subjectStats: subjectStatsResult.rows,
         difficultyDistribution: difficultyResult.rows,
         recentUsers: recentUsersResult.rows,
-        recentQuestions: recentQuestionsResult.rows,
+        recentTransactions: recentTxResult.rows,
+        trends: {
+          registrations: regTrendResult.rows,
+          sessions: sessionTrendResult.rows,
+          revenue: revenueTrendResult.rows,
+        },
+        serverHealth: {
+          status: 'healthy',
+          timestamp: new Date().toISOString(),
+          nodeEnv: process.env.NODE_ENV || 'development',
+        }
       },
     });
   } catch (error) {
