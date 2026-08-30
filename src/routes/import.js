@@ -13,14 +13,19 @@ const { generateQuestionHash } = require('../utils/questionHashUtil');
  * Expects multipart/form-data with:
  *   - file              : Excel file (.xlsx or .xls)
  *   - subject_id        : UUID of the subject
+ *   - topic_id          : UUID of topic (optional, can be auto-resolved from MATERI column)
  *   - difficulty        : 'easy' | 'medium' | 'hard'  (default: 'medium')
- *   - destination       : 'latihan' | 'tryout' (default: 'latihan')
+ *   - destination       : 'latihan' | 'tryout' | 'battle' (default: 'latihan')
  *   - tryout_package_id : UUID of tryout package (required if destination is 'tryout')
  *
  * Excel columns (header row required, case-insensitive):
- *   SOAL | OPSI A | OPSI B | OPSI C | OPSI D | OPSI E | KUNCI JAWABAN | PEMBAHASAN
+ *   MATERI | STIMULUS | SOAL | OPSI A | OPSI B | OPSI C | OPSI D | OPSI E | LABEL KOLOM | KUNCI JAWABAN | PEMBAHASAN | TIPE SOAL | GAMBAR | POSISI GAMBAR | TINGKAT KESULITAN
  *
- * No question limit — all rows in the file will be processed.
+ * Supports 4 Question Types:
+ *   1. multiple_choice (Pilihan Ganda Tunggal, 1 kunci A-E)
+ *   2. complex_mc_multi (Pilihan Ganda Lebih dari 1 Jawaban, e.g. A, C)
+ *   3. complex_mc_tf (PG Kompleks Benar/Salah & Custom Label, e.g. A:Benar, B:Salah atau A:Tepat, B:Tidak Tepat)
+ *   4. short_answer (Jawaban Singkat / Isian)
  */
 router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (req, res, next) => {
   if (!req.file) {
@@ -37,6 +42,16 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
 
   // Flexible column name resolver (handles BOM, extra spaces, case differences)
   const ALIASES = {
+    materi: [
+      'materi', 'topik', 'topic', 'judul materi', 'bab', 'materi pokok',
+      'nama materi', 'subtes materi', 'materi/topik', 'materi / topik',
+      'materi soal', 'bab/materi', 'bab materi'
+    ],
+    tingkat_kesulitan: [
+      'tingkat kesulitan', 'tingkat_kesulitan', 'kesulitan', 'difficulty',
+      'level kesulitan', 'level', 'tingkat', 'kesulitan soal',
+      'kategori kesulitan', 'derajat kesulitan', 'tingkat kesukaran'
+    ],
     stimulus:      ['stimulus', 'wacana', 'bacaan', 'stimulus/wacana', 'stimulus/wacana (opsional)'],
     soal:          ['soal', 'content', 'question', 'pertanyaan'],
     opsi_a:        ['opsi a', 'opsia', 'choice_a', 'pilihan a', 'a'],
@@ -48,12 +63,13 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
     pembahasan:    ['pembahasan', 'explanation', 'penjelasan'],
     image_url:     ['gambar', 'image', 'image_url', 'url gambar', 'foto'],
     tipe_soal:     ['tipe soal', 'tipe', 'question_type', 'type', 'tipe_soal'],
-    label_kolom:   ['label_kolom', 'label kolom', 'kolom_pilihan', 'tf_label', 'label_benar_salah', 'opsi_label', 'label_opsi'],
+    label_kolom:   ['label_kolom', 'label kolom', 'kolom_pilihan', 'tf_label', 'label_benar_salah', 'opsi_label', 'label_opsi', 'label', 'format label', 'format_label'],
     image_position:['posisi gambar', 'posisi_gambar', 'image_position', 'image position'],
   };
 
   const resolve = (row, key) => {
     const aliases = ALIASES[key];
+    if (!aliases) return '';
     for (const alias of aliases) {
       for (const rowKey of Object.keys(row)) {
         const clean = rowKey.replace(/^\uFEFF/, '').trim().toLowerCase();
@@ -65,6 +81,48 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
       }
     }
     return '';
+  };
+
+  const resolveWithPositionalFallback = (row, key, pos) => {
+    const directVal = resolve(row, key);
+    if (directVal) return directVal;
+
+    const keys = Object.keys(row);
+    if (keys.length === 0) return '';
+    if (pos === 'start') {
+      const firstKey = keys[0];
+      const cleanKey = firstKey.replace(/^\uFEFF/, '').trim().toLowerCase();
+      const isKnownStandardCol = ['soal', 'content', 'stimulus', 'opsi a', 'a', 'opsi b', 'b', 'kunci', 'kunci jawaban'].includes(cleanKey);
+      if (!isKnownStandardCol) {
+        const val = row[firstKey];
+        if (val !== null && val !== undefined && String(val).trim() !== '') {
+          return String(val).trim();
+        }
+      }
+    } else if (pos === 'end') {
+      const lastKey = keys[keys.length - 1];
+      const cleanKey = lastKey.replace(/^\uFEFF/, '').trim().toLowerCase();
+      const isKnownStandardCol = ['soal', 'opsi a', 'opsi b', 'opsi c', 'opsi d', 'opsi e', 'kunci'].includes(cleanKey);
+      if (!isKnownStandardCol) {
+        const val = row[lastKey];
+        if (val !== null && val !== undefined && String(val).trim() !== '') {
+          return String(val).trim();
+        }
+      }
+    }
+    return '';
+  };
+
+  // Helper to evaluate true/false boolean safely (handles "Tidak Tepat", "Tidak Sesuai", etc.)
+  const isValueTrue = (val) => {
+    const v = String(val).trim().toUpperCase();
+    if (v.startsWith('TIDAK') || v.startsWith('BUKAN') || v === 'S' || v === 'SALAH' || v === 'FALSE' || v === '0') {
+      return false;
+    }
+    if (v === 'B' || v === 'T' || v === '1' || v === 'YA' || v === 'BENAR' || v === 'TRUE' || v === 'TEPAT' || v === 'SESUAI' || v.startsWith('BENAR') || v.startsWith('TRUE') || v.startsWith('TEPAT') || v.startsWith('SESUAI')) {
+      return true;
+    }
+    return false;
   };
 
   // Parse Excel file
@@ -85,6 +143,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
   let importedCount = 0;
   let rejectedCount = 0;
   const errors = [];
+  const topicCache = {};
 
   const client = await pool.connect();
   try {
@@ -103,11 +162,37 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
         [subject_id]
       );
     }
-    let nextDisplayOrder = (maxOrderRes.rows[0]?.max_order || 0) + 1;
+    let nextDisplayOrder = (parseInt(maxOrderRes.rows[0]?.max_order, 10) || 0) + 1;
 
     for (let i = 0; i < results.length; i++) {
       const row = results[i];
       const rowNum = i + 2; // row 1 = header
+
+      let rawMateri = resolve(row, 'materi');
+      let rawDifficulty = resolve(row, 'tingkat_kesulitan');
+
+      // Check positional fallback if not matched by header alias
+      if (!rawMateri) {
+        const candidateStart = resolveWithPositionalFallback(row, 'materi', 'start');
+        const candidateEnd = resolveWithPositionalFallback(row, 'materi', 'end');
+        const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
+        if (candidateStart && !diffKeywords.includes(candidateStart.toLowerCase())) {
+          rawMateri = candidateStart;
+        } else if (candidateEnd && !diffKeywords.includes(candidateEnd.toLowerCase())) {
+          rawMateri = candidateEnd;
+        }
+      }
+
+      if (!rawDifficulty) {
+        const candidateStart = resolveWithPositionalFallback(row, 'tingkat_kesulitan', 'start');
+        const candidateEnd = resolveWithPositionalFallback(row, 'tingkat_kesulitan', 'end');
+        const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
+        if (candidateEnd && diffKeywords.includes(candidateEnd.toLowerCase())) {
+          rawDifficulty = candidateEnd;
+        } else if (candidateStart && diffKeywords.includes(candidateStart.toLowerCase())) {
+          rawDifficulty = candidateStart;
+        }
+      }
 
       const stimulus   = resolve(row, 'stimulus');
       const soal       = resolve(row, 'soal');
@@ -121,6 +206,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
       const imageUrl   = resolve(row, 'image_url');
       const rawTipe    = resolve(row, 'tipe_soal').toLowerCase();
       const rawPos     = resolve(row, 'image_position').toLowerCase();
+      const rawLabelKolom = resolve(row, 'label_kolom');
       const imagePosition = ['before', 'atas', 'top'].includes(rawPos) ? 'top' :
                             ['middle', 'ditengah', 'tengah'].includes(rawPos) ? 'middle' :
                             ['after', 'bawah', 'bottom'].includes(rawPos) ? 'bottom' : 'bottom';
@@ -133,14 +219,46 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
       }
 
       // Determine question type
-      const rawLabelKolom = resolve(row, 'label_kolom');
       let questionType = 'multiple_choice';
-      if (rawTipe.includes('multi') || rawTipe.includes('lebih') || rawTipe.includes('centang')) {
+      const cleanTipe = rawTipe.replace(/[\s\-_]+/g, ' ').trim();
+
+      if (
+        cleanTipe === 'multiple choice' ||
+        cleanTipe === 'single' ||
+        cleanTipe === 'pg tunggal' ||
+        cleanTipe === 'pilihan ganda tunggal' ||
+        cleanTipe === 'pilihan ganda' ||
+        cleanTipe === 'pg'
+      ) {
+        questionType = 'multiple_choice';
+      } else if (
+        cleanTipe.includes('complex mc multi') ||
+        cleanTipe.includes('multi jawaban') ||
+        cleanTipe.includes('multi opsi') ||
+        cleanTipe.includes('lebih dari 1') ||
+        cleanTipe.includes('lebih dari satu') ||
+        cleanTipe.includes('banyak jawaban') ||
+        cleanTipe.includes('centang') ||
+        (cleanTipe.includes('multi') && !cleanTipe.includes('multiple choice'))
+      ) {
         questionType = 'complex_mc_multi';
-      } else if (rawTipe === 'complex_mc_tf' || rawTipe === 'pilihan_ganda_kompleks' || rawTipe === 'benar_salah' || rawTipe === 'benar salah' || rawTipe.includes('tf') || rawTipe.includes('tepat') || rawTipe.includes('true')) {
-        questionType = 'complex_mc_tf';
-      } else if (rawTipe === 'short_answer' || rawTipe === 'isian') {
+      } else if (
+        cleanTipe.includes('short') ||
+        cleanTipe.includes('isian') ||
+        cleanTipe.includes('singkat')
+      ) {
         questionType = 'short_answer';
+      } else if (
+        cleanTipe.includes('complex mc tf') ||
+        cleanTipe.includes('kompleks') ||
+        cleanTipe.includes('complex') ||
+        cleanTipe.includes('benar') ||
+        cleanTipe.includes('salah') ||
+        cleanTipe.includes('tf') ||
+        cleanTipe.includes('tepat') ||
+        cleanTipe.includes('true')
+      ) {
+        questionType = 'complex_mc_tf';
       } else if (!opsiA && !opsiB && !opsiC && !opsiD && !opsiE) {
         questionType = 'short_answer';
       }
@@ -176,7 +294,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
           { label: 'E', content: opsiE },
         ].filter(c => c.content !== '');
 
-        const matchedLetters = kunci.toUpperCase().match(/[A-E]/g) || [];
+        const matchedLetters = (kunci || '').toUpperCase().match(/[A-E]/g) || [];
         const correctLetters = Array.from(new Set(matchedLetters));
         if (correctLetters.length === 0) {
           errors.push(`Baris ${rowNum}: Kunci jawaban tidak valid untuk pilihan multi (harus berisi A/B/C/D/E)`);
@@ -207,7 +325,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
           { label: 'E', content: opsiE },
         ].filter(c => c.content !== '');
 
-        const cleanKunci = kunci.toUpperCase().replace(/\s+/g, '');
+        const cleanKunci = (kunci || '').toUpperCase().trim();
         if (rawLabelKolom) {
           const parts = rawLabelKolom.split(/[\/,;|\-]+/).map(p => p.trim()).filter(Boolean);
           if (parts.length >= 2) {
@@ -225,25 +343,26 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
           optionsConfig = { true_label: 'Benar', false_label: 'Salah' };
         }
 
-        const trueKeywords = ['B', 'T', 'BENAR', 'TRUE', 'TEPAT', 'SESUAI', 'YA', '1'];
         if (cleanKunci.includes(':')) {
-          // Format "A:B,B:S"
-          const pairs = cleanKunci.split(',');
+          // Format "A:Benar, B:Salah" or "A:Tepat, B:Tidak Tepat"
+          const pairs = cleanKunci.split(/[,;\n\r]+/);
           for (const pair of pairs) {
-            const [lbl, val] = pair.split(':');
-            if (lbl && val) {
-              const isTrue = trueKeywords.some(kw => val.startsWith(kw));
-              correctnessMap[lbl] = isTrue;
+            const colonIdx = pair.indexOf(':');
+            if (colonIdx !== -1) {
+              const lbl = pair.substring(0, colonIdx).trim().toUpperCase();
+              const val = pair.substring(colonIdx + 1).trim();
+              if (lbl && val) {
+                correctnessMap[lbl] = isValueTrue(val);
+              }
             }
           }
         } else {
-          // Format "B,S,B"
-          const parts = cleanKunci.split(/[,;\s]+/);
+          // Format "Benar, Salah, Benar" or "B, S, B"
+          const parts = cleanKunci.split(/[,;\n\r]+/).map(s => s.trim()).filter(Boolean);
           const labels = ['A', 'B', 'C', 'D', 'E'];
           parts.forEach((part, idx) => {
             if (idx < labels.length) {
-              const isTrue = trueKeywords.some(kw => part.startsWith(kw));
-              correctnessMap[labels[idx]] = isTrue;
+              correctnessMap[labels[idx]] = isValueTrue(part);
             }
           });
         }
@@ -254,7 +373,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
           rejectedCount++;
           continue;
         }
-        const upperKunci = kunci.toUpperCase().trim();
+        const upperKunci = (kunci || '').toUpperCase().trim();
         if (!['A', 'B', 'C', 'D', 'E'].includes(upperKunci)) {
           errors.push(`Baris ${rowNum}: KUNCI JAWABAN '${kunci}' tidak valid (harus A/B/C/D/E)`);
           rejectedCount++;
@@ -277,6 +396,42 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
         }
       }
 
+      // Resolve difficulty per question
+      let resolvedDifficulty = difficulty || 'medium';
+      if (rawDifficulty) {
+        const dLower = rawDifficulty.toLowerCase().trim();
+        if (dLower.includes('mudah') || dLower.includes('easy') || dLower.includes('dasar') || dLower === '1') {
+          resolvedDifficulty = 'easy';
+        } else if (dLower.includes('sulit') || dLower.includes('hard') || dLower.includes('sukar') || dLower.includes('hots') || dLower.includes('tinggi') || dLower === '3') {
+          resolvedDifficulty = 'hard';
+        } else if (dLower.includes('sedang') || dLower.includes('medium') || dLower.includes('menengah') || dLower === '2') {
+          resolvedDifficulty = 'medium';
+        }
+      }
+
+      // Resolve topic/materi per question (auto-link or auto-create topic if named)
+      let resolvedTopicId = topic_id || null;
+      if (rawMateri) {
+        const materiKey = rawMateri.toLowerCase().trim();
+        if (!topicCache[materiKey]) {
+          const tRes = await client.query(
+            `SELECT id FROM topics WHERE subject_id = $1 AND LOWER(TRIM(title)) = LOWER(TRIM($2)) LIMIT 1`,
+            [subject_id, rawMateri.trim()]
+          );
+          if (tRes.rows.length > 0) {
+            topicCache[materiKey] = tRes.rows[0].id;
+          } else {
+            const newTopicRes = await client.query(
+              `INSERT INTO topics (subject_id, title, difficulty_level, card_type)
+               VALUES ($1, $2, 'Dasar', 'standard') RETURNING id`,
+              [subject_id, rawMateri.trim()]
+            );
+            topicCache[materiKey] = newTopicRes.rows[0].id;
+          }
+        }
+        resolvedTopicId = topicCache[materiKey];
+      }
+
       // Compute content hash
       const hashChoices = questionType === 'short_answer'
         ? [kunci]
@@ -287,8 +442,26 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
       const pkgId = destination === 'tryout' ? tryout_package_id : null;
       const qSource = destination === 'battle' ? 'battle' : 'manual';
       const qRes = await client.query(
-        'INSERT INTO questions (subject_id, topic_id, content, difficulty, tryout_package_id, display_order, source, image_url, image_position, question_type, options_config, content_hash, stimulus) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id',
-        [subject_id, topic_id || null, soal, difficulty, pkgId, nextDisplayOrder, qSource, imageUrl || null, imagePosition, questionType, JSON.stringify(optionsConfig), hash, stimulus || null]
+        `INSERT INTO questions (subject_id, topic_id, content, difficulty, tryout_package_id, display_order, source, image_url, image_position, question_type, options_config, content_hash, stimulus, workflow_status, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id`,
+        [
+          subject_id,
+          resolvedTopicId,
+          soal,
+          resolvedDifficulty,
+          pkgId,
+          nextDisplayOrder,
+          qSource,
+          imageUrl || null,
+          imagePosition,
+          questionType,
+          JSON.stringify(optionsConfig),
+          hash,
+          stimulus || null,
+          'under_review',
+          req.user.id
+        ]
       );
       const questionId = qRes.rows[0].id;
       nextDisplayOrder++;
@@ -308,7 +481,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
           );
         }
       } else {
-        const upperKunci = kunci.toUpperCase().trim();
+        const upperKunci = (kunci || '').toUpperCase().trim();
         for (const choice of choices) {
           const isCorrect = choice.label === upperKunci;
           await client.query(

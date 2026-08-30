@@ -16,20 +16,25 @@ const {
 } = require("../utils/tryoutCompletionUtil");
 const { getUtbkPackageAttemptInfo } = require("../utils/utbkAttemptUtil");
 
+const WIB_OFFSET_HOURS = 7;
+
 function parseLocalDate(dateVal) {
   if (!dateVal) return null;
   if (dateVal instanceof Date) {
     // pg driver returns timestamp-without-timezone values as Date objects
-    // interpreting the raw digits as UTC. But admin entered them as local time (WIB).
-    // Extract the UTC components and create a new Date treating them as local time.
-    return new Date(
+    // interpreting the raw digits as UTC. But admin entered them as WIB (UTC+7).
+    // Extract the UTC components (which are the raw WIB digits) and build a
+    // proper Date by subtracting the WIB offset so the Date object represents
+    // the correct absolute point in time regardless of server timezone.
+    const utcMs = Date.UTC(
       dateVal.getUTCFullYear(),
       dateVal.getUTCMonth(),
       dateVal.getUTCDate(),
-      dateVal.getUTCHours(),
+      dateVal.getUTCHours() - WIB_OFFSET_HOURS,
       dateVal.getUTCMinutes(),
       dateVal.getUTCSeconds()
     );
+    return new Date(utcMs);
   }
   let str = String(dateVal).trim();
   if (str.includes('T')) {
@@ -38,14 +43,16 @@ function parseLocalDate(dateVal) {
   str = str.replace(' ', 'T');
   const parts = str.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/);
   if (parts) {
-    return new Date(
+    // Treat parsed digits as WIB (UTC+7) and convert to absolute UTC
+    const utcMs = Date.UTC(
       parseInt(parts[1], 10),
       parseInt(parts[2], 10) - 1,
       parseInt(parts[3], 10),
-      parseInt(parts[4] || '0', 10),
+      parseInt(parts[4] || '0', 10) - WIB_OFFSET_HOURS,
       parseInt(parts[5] || '0', 10),
       parseInt(parts[6] || '0', 10)
     );
+    return new Date(utcMs);
   }
   const d = new Date(dateVal);
   return isNaN(d.getTime()) ? null : d;
