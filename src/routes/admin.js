@@ -3,7 +3,6 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 const { verifyToken, verifyAdmin } = require('../middleware/auth');
-const { getApiKeyManager } = require('../services/apiKeyManager');
 const { getJwtSecret } = require('../config/jwt');
 
 const decodeTokenFromRequest = (req) => {
@@ -329,12 +328,11 @@ router.get('/stats', verifyToken, verifyAdmin, async (req, res, next) => {
       `),
     ]);
 
-    let aiKeyStatus = null;
-    try {
-      aiKeyStatus = getApiKeyManager().getKeyStatus();
-    } catch (e) {
-      aiKeyStatus = { error: e.message };
-    }
+    let aiKeyStatus = {
+      provider: '9Router',
+      status: process.env.NINEROUTER_API_KEY ? 'configured' : 'not configured',
+      model: process.env.NINEROUTER_MODEL || 'stubia'
+    };
 
     const usersData = usersResult.rows[0] || {};
     const growthData = usersGrowthResult.rows[0] || {};
@@ -821,41 +819,33 @@ router.delete('/team/:id', verifyToken, verifyAdmin, async (req, res, next) => {
   }
 });
 
-// GET /api/admin/api-keys-status - Monitor Gemini API keys health
+// GET /api/admin/api-keys-status - Monitor AI API keys health
 router.get('/api-keys-status', verifyToken, verifyAdmin, async (req, res, next) => {
   try {
-    const manager = getApiKeyManager();
-    const status = manager.getKeyStatus();
-
     res.json({
       success: true,
-      data: status,
-      message: 'API Keys status retrieved successfully'
+      data: {
+        provider: '9Router',
+        status: process.env.NINEROUTER_API_KEY ? 'configured' : 'not configured',
+        model: process.env.NINEROUTER_MODEL || 'stubia',
+        baseUrl: process.env.NINEROUTER_BASE_URL || 'https://ninerouter-jek.onrender.com/v1'
+      },
+      message: 'AI API status retrieved successfully'
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: error.message || 'Failed to get API keys status'
+      error: error.message || 'Failed to get API status'
     });
   }
 });
 
-// POST /api/admin/api-keys-reset - Admin reset all API keys (clear cooldown)
+// POST /api/admin/api-keys-reset - No longer needed (9Router uses single key)
 router.post('/api-keys-reset', verifyToken, verifyAdmin, async (req, res, next) => {
-  try {
-    const manager = getApiKeyManager();
-    manager.resetAllKeys();
-
-    res.json({
-      success: true,
-      message: 'All API keys reset to available status'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to reset API keys'
-    });
-  }
+  res.json({
+    success: true,
+    message: '9Router uses a single API key — no rotation/reset needed'
+  });
 });
 
 // GET /api/admin/questions/duplicates - Find all duplicate questions in both UTBK and UM

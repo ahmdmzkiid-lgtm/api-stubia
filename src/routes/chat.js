@@ -3,7 +3,7 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { verifyToken } = require('../middleware/auth');
 const { chatLimiter } = require('../middleware/rateLimiter');
-const { chatWithKakZ, chatKonsultasi } = require('../services/geminiService');
+const { chatWithStu, chatKonsultasi } = require('../services/nineRouterService');
 const { chatDiscussQuestionWithDeepSeek } = require('../services/deepseekService');
 
 const MONTHLY_AI_MESSAGE_LIMIT = 600; // 600 messages per user per month
@@ -49,7 +49,7 @@ router.post('/', verifyToken, chatLimiter, async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Message is required' });
     }
     
-    const reply = await chatWithKakZ(message, history || []);
+    const reply = await chatWithStu(message, history || []);
     
     res.json({ 
       success: true, 
@@ -128,7 +128,7 @@ router.post('/discuss', verifyToken, chatLimiter, async (req, res, next) => {
       }
     }
 
-    // Generate response via DeepSeek (with automatic Gemini fallback)
+    // Generate response via DeepSeek (with automatic 9Router fallback)
     const reply = await chatDiscussQuestionWithDeepSeek(message, questionContext, history || []);
 
     // Increment monthly usage count for non-admin users

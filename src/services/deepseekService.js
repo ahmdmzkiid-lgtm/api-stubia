@@ -1,15 +1,15 @@
-const { chatDiscussQuestion } = require('./geminiService');
+const { chatDiscussQuestion } = require('./nineRouterService');
 
 /**
  * Discuss a specific UTBK question using DeepSeek API with anti-troll prompt security,
- * KaTeX formatting, and automatic fallback to Gemini Service.
+ * KaTeX formatting, and automatic fallback to 9Router Service.
  */
 const chatDiscussQuestionWithDeepSeek = async (message, questionContext, history = []) => {
   const apiKey = process.env.DEEPSEEK_API_KEY;
 
-  // Fallback to Gemini if DeepSeek API key is not configured
+  // Fallback to 9Router if DeepSeek API key is not configured
   if (!apiKey || !apiKey.trim()) {
-    console.log('[AI Discussion] DEEPSEEK_API_KEY not configured, falling back to Gemini Service.');
+    console.log('[AI Discussion] DEEPSEEK_API_KEY not configured, falling back to 9Router Service.');
     return chatDiscussQuestion(message, questionContext, history);
   }
 
@@ -81,7 +81,7 @@ Penjelasan resmi: ${questionContext.explanation || 'Tidak tersedia'}
     return reply;
   } catch (error) {
     console.error('[DeepSeek Discussion Error]:', error.message);
-    console.log('[AI Discussion] Falling back to Gemini Service due to DeepSeek error.');
+    console.log('[AI Discussion] Falling back to 9Router Service due to DeepSeek error.');
     return chatDiscussQuestion(message, questionContext, history);
   }
 };

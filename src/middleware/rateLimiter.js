@@ -42,7 +42,7 @@ const publicUploadLimiter = rateLimit({
   },
 });
 
-// Rate limiter for AI Chat endpoints (Gemini API protection)
+// Rate limiter for AI Chat endpoints (9Router API protection)
 const chatLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
   max: 15, // Limit each IP to 15 chat messages per minute
