@@ -85,7 +85,8 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(morgan('dev'));
 
 // Basic health check route
@@ -154,7 +155,15 @@ app.use('/api/mitra', mitraRoutes);
 // Global Error Handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  const statusCode = err.status || 500;
+  const origin = req.headers.origin;
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Vary', 'Origin');
+  }
+  const statusCode = err.status || (err.type === 'entity.too.large' ? 413 : 500);
   const errorMessage = process.env.NODE_ENV === 'production' && statusCode === 500
     ? 'Terjadi kesalahan pada server. Silakan coba lagi nanti.'
     : (err.message || 'Internal Server Error');

@@ -335,7 +335,7 @@ router.post("/", verifyToken, verifyAdmin, async (req, res, next) => {
       const choicePromises = choices.map((c) =>
         client.query(
           "INSERT INTO answer_choices (question_id, label, content, is_correct, explanation) VALUES ($1, $2, $3, $4, $5)",
-          [question.id, c.label, c.content, c.is_correct, c.explanation],
+          [question.id, c.label || 'A', c.content ?? '', c.is_correct ?? false, c.explanation ?? null],
         ),
       );
       await Promise.all(choicePromises);
@@ -663,7 +663,8 @@ router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
       }
     } else if (choices !== undefined && Array.isArray(choices)) {
       // Multiple choice updating
-      const clientChoiceIds = choices.filter(c => c.id).map(c => c.id);
+      const isValidUUID = (val) => typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+      const clientChoiceIds = choices.filter(c => c.id && isValidUUID(c.id)).map(c => c.id);
 
       // 1. Delete choices not in request list
       if (clientChoiceIds.length > 0) {
@@ -680,15 +681,15 @@ router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
 
       // 2. Insert or update choices
       for (const choice of choices) {
-        if (choice.id) {
+        if (choice.id && isValidUUID(choice.id)) {
           await client.query(
             "UPDATE answer_choices SET label = $1, content = $2, is_correct = $3, explanation = $4 WHERE id = $5 AND question_id = $6",
-            [choice.label, choice.content, choice.is_correct || false, choice.explanation || null, choice.id, id]
+            [choice.label || 'A', choice.content ?? '', choice.is_correct ?? false, choice.explanation ?? null, choice.id, id]
           );
         } else {
           await client.query(
             "INSERT INTO answer_choices (question_id, label, content, is_correct, explanation) VALUES ($1, $2, $3, $4, $5)",
-            [id, choice.label, choice.content, choice.is_correct || false, choice.explanation || null]
+            [id, choice.label || 'A', choice.content ?? '', choice.is_correct ?? false, choice.explanation ?? null]
           );
         }
       }
