@@ -563,7 +563,7 @@ router.patch(
 );
 
 // Update Soal (Admin Only)
-router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
+const updateSoalHandler = async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -716,7 +716,10 @@ router.patch("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
   } finally {
     client.release();
   }
-});
+};
+
+router.patch("/:id", verifyToken, verifyAdmin, updateSoalHandler);
+router.post("/:id/update", verifyToken, verifyAdmin, updateSoalHandler);
 
 // Bulk Update Workflow Status (Admin / QA)
 router.post("/bulk-workflow", verifyToken, verifyAdmin, async (req, res, next) => {
