@@ -383,4 +383,217 @@ Penjelasan resmi: ${questionContext.explanation || 'Tidak tersedia'}
   }
 };
 
-module.exports = { chatWithStu, chatKonsultasi, chatDiscussQuestion };
+const getSubtestRules = (subjectTitle) => {
+  if (!subjectTitle) return '';
+  const title = subjectTitle.toLowerCase();
+  
+  if (title.includes('literasi') || title.includes('pemahaman bacaan') || title.includes('pengetahuan dan pemahaman')) {
+    return `\n*FOKUS SUBTES (${subjectTitle})*: Evaluasi kedalaman analisis teks. Stimulus WAJIB berupa teks/wacana yang kompleks. Pertanyaan harus menuntut siswa memahami makna tersirat, menyimpulkan, atau menganalisis struktur paragraf. JANGAN buat soal yang jawabannya bisa di-"copy-paste" langsung dari teks (C1).`;
+  }
+  
+  if (title.includes('kuantitatif') || title.includes('matematika')) {
+    return `\n*FOKUS SUBTES (${subjectTitle})*: Evaluasi penalaran matematis. Pastikan angka, rumus, dan logika matematika 100% akurat. Distraktor HARUS berasal dari kesalahan hitung umum (misal: salah tanda minus, lupa menguadratkan, salah rumus). Pembahasan harus menjabarkan langkah perhitungan baris demi baris secara detail.`;
+  }
+  
+  if (title.includes('penalaran umum')) {
+    return `\n*FOKUS SUBTES (${subjectTitle})*: Evaluasi logika formal (silogisme, penalaran induktif/deduktif, kecukupan data). Pastikan premis logis dan tidak memiliki kecacatan logika (fallacy). Distraktor harus berupa penarikan kesimpulan yang salah namun terlihat logis.`;
+  }
+
+  return '';
+};
+
+/**
+ * AI Review for admin question quality analysis
+ * Analyzes writing quality, question worthiness, choices quality, explanation quality
+ */
+const reviewQuestion = async (questionData) => {
+  try {
+    const { content, stimulus, difficulty, choices, questionType, subjectTitle } = questionData;
+
+    const choicesText = (choices || [])
+      .map(c => `${c.label}. ${c.content}${c.is_correct ? ' ✅ (jawaban benar)' : ''}${c.is_correct && c.explanation ? `\n   Pembahasan: ${c.explanation}` : ''}`)
+      .join('\n');
+
+    const difficultyLabel = difficulty === 'easy' ? 'Mudah' : difficulty === 'hard' ? 'Sulit' : 'Sedang';
+
+    const typeLabel = questionType === 'complex_mc_tf' ? 'Benar/Salah Kompleks' :
+                      questionType === 'complex_mc_multi' ? 'Pilihan Ganda Multi-Jawaban' :
+                      questionType === 'short_answer' ? 'Isian Singkat' : 'Pilihan Ganda';
+
+    const subtestRules = getSubtestRules(subjectTitle);
+
+    const systemPrompt = `Kamu adalah Quality Assurance AI ahli yang bertugas me-review soal latihan UTBK/SNBT untuk platform Stubia.
+Tugasmu adalah menganalisis SATU soal secara menyeluruh dan memberikan review terstruktur.${subtestRules}
+
+=== SOAL YANG AKAN DI-REVIEW ===
+Subtes: ${subjectTitle || 'Umum'}
+Tipe soal: ${typeLabel}
+Tingkat kesulitan: ${difficultyLabel}
+${stimulus ? `Stimulus/Wacana:\n${stimulus}\n` : ''}
+Soal: ${content}
+
+Pilihan jawaban:
+${choicesText}
+
+=== KRITERIA REVIEW (WAJIB DIPATUHI) ===
+
+Kamu HARUS memberikan review dalam format PERSIS seperti di bawah ini. JANGAN mengubah format, header, atau struktur.
+
+**FORMAT OUTPUT (WAJIB):**
+
+📝 KERAPIHAN PENULISAN
+[Analisis: cek typo, tanda baca, EYD/PUEBI, format penulisan, penggunaan huruf kapital, tanda baca di pilihan jawaban, konsistensi gaya bahasa.]
+
+📋 KELAYAKAN SOAL & HOTS
+[Analisis: apakah soal sesuai standar UTBK/SNBT? Evaluasi berdasarkan Taksonomi Bloom (C4-Analisis, C5-Evaluasi, C6-Mencipta). Soal TIDAK BOLEH sekadar menguji hafalan (C1-C2). Apakah stimulus/wacana benar-benar fungsional dan wajib dibaca untuk menjawab soal, atau hanya sekadar hiasan? Apakah tingkat kesulitan (${difficultyLabel}) sesuai?]
+
+🔤 KUALITAS PILIHAN JAWABAN
+[Analisis: apakah distraktor (pengecoh) disusun berdasarkan "common misconception" (kesalahan konsep/hitung/logika yang sering dilakukan siswa)? Pastikan tidak ada opsi yang asal-asalan, konyol, atau sangat mudah ditebak salahnya. Pastikan jawaban benar 100% valid tanpa ambiguitas.]
+
+💡 KUALITAS PEMBAHASAN
+[Analisis: apakah pembahasan jelas, terstruktur, dan mendidik? Apakah pembahasan tidak hanya sekadar memberikan kunci jawaban, tetapi menjelaskan PROSES BERPIKIR (step-by-step)? Apakah pembahasan membahas mengapa opsi lain salah (opsional tapi disarankan)?]
+
+⭐ SKOR KELAYAKAN: [angka 1-10]/10
+
+🎯 REKOMENDASI PERBAIKAN:
+[Berikan 2-5 poin rekomendasi konkret dan actionable. Fokus pada peningkatan level HOTS, perbaikan logika distraktor, pemastian fungsi stimulus, dan detail penjelasan.]
+
+=== ATURAN KETAT ===
+1. WAJIB gunakan format di atas PERSIS. Jangan tambahkan section lain.
+2. WAJIB berikan skor 1-10 dengan format "⭐ SKOR KELAYAKAN: X/10". Berikan skor RENDAH (< 7) jika soal hanya sekadar hafalan atau stimulusnya tidak berguna.
+3. Analisis harus SPESIFIK merujuk pada isi soal, BUKAN generik.
+4. Gunakan bahasa Indonesia profesional.
+5. JANGAN mengarang informasi yang tidak ada di soal.
+6. Berikan review yang SANGAT KRITIS, TAJAM, dan JUJUR. Jangan terlalu memuji jika soal belum setara level analitis UTBK/SNBT sesungguhnya.`;
+
+    const userMessage = 'Tolong review soal di atas secara menyeluruh berdasarkan kriteria yang sudah ditentukan.';
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage }
+    ];
+
+    return await callNineRouter(messages, { temperature: 0.3, max_tokens: 3000 });
+  } catch (error) {
+    console.error('[9Router] Review question error:', error.message);
+    throw new Error('Gagal melakukan review AI. Ada gangguan teknis sebentar.');
+  }
+};
+
+/**
+ * AI Fix Question
+ * Automatically applies fixes to a question based on AI review
+ */
+  const fixQuestion = async (questionData, reviewNotes) => {
+  try {
+    const { content, stimulus, choices, questionType, difficulty, subjectTitle } = questionData;
+
+    const difficultyLabel = difficulty === 'easy' ? 'Mudah' : difficulty === 'hard' ? 'Sulit' : 'Sedang';
+
+    const choicesText = (choices || [])
+      .map(c => `ID: ${c.id}\nLabel: ${c.label}\nIsi: ${c.content}\nBenar: ${c.is_correct}\nPembahasan: ${c.explanation || ''}`)
+      .join('\n\n');
+
+    const subtestRules = getSubtestRules(subjectTitle);
+
+    const systemPrompt = `Kamu adalah AI Pembuat Soal yang bertugas MEMPERBAIKI soal UTBK/SNBT berdasarkan review yang diberikan.
+Tugasmu adalah menghasilkan versi perbaikan dari soal ini dalam format JSON yang valid.${subtestRules}
+
+=== SOAL ASLI ===
+Subtes: ${subjectTitle || 'Umum'}
+Stimulus/Wacana: ${stimulus || ''}
+Soal: ${content}
+Tipe Soal: ${questionType}
+Tingkat Kesulitan: ${difficultyLabel}
+
+Pilihan Jawaban Asli:
+${choicesText}
+
+=== CATATAN REVIEW ===
+${reviewNotes}
+
+=== INSTRUKSI PERBAIKAN ===
+1. IMPLEMENTASIKAN SELURUH rekomendasi dari CATATAN REVIEW secara tuntas, jangan sampai ada yang terlewat! Jika sebelumnya skornya di bawah 10, perbaikanmu harus memastikan soal ini layak mendapat skor 10/10 pada review berikutnya.
+2. TINGKATKAN LEVEL KOGNITIF (HOTS): Ubah narasi/pertanyaan agar menuntut pemikiran analitis (C4), evaluatif (C5), atau kreatif (C6). Jangan biarkan soal hanya berupa hafalan (C1-C2).
+3. OPTIMALKAN STIMULUS: Jika wacana/stimulus tidak fungsional (bisa diabaikan), ubah pertanyaannya agar jawaban SANGAT TERGANTUNG pada analisis stimulus tersebut.
+4. REKAYASA DISTRAKTOR (PENGECOH): Rombak opsi yang salah agar berasal dari "common misconception" (kesalahan konsep yang sering dialami siswa), bukan sekadar jawaban konyol yang mudah dieliminasi.
+5. TANPA SPOILER JAWABAN: JANGAN SEKALI-KALI menebalkan (**bold**), menggarisbawahi, atau menyoroti kata/kalimat di dalam teks stimulus/wacana/soal yang merupakan kunci jawaban. Stimulus harus murni teks objektif.
+6. JANGAN memasukkan pilihan jawaban (A, B, C, D, E) ke dalam field "content" atau "stimulus". Pilihan jawaban HANYA boleh diletakkan secara terpisah di dalam array "choices".
+7. WAJIB menggunakan format KaTeX (\$...\$) jika ada rumus matematika atau simbol kimia.
+8. JANGAN gunakan tag HTML seperti <br>, <p>, atau <strong>. Gunakan format Markdown standar untuk formatting teks.
+9. Output HARUS BERUPA JSON VALID tanpa teks lain di luar JSON. Isi field "analytical_reasoning" dengan argumenmu mengapa soal ini sekarang valid sebagai soal HOTS dan apa jebakan pada distraktornya.
+
+=== FORMAT OUTPUT JSON WAJIB ===
+{
+  "analytical_reasoning": "Jelaskan langkah perbaikanmu: mengapa soal kini berada di level HOTS (C4-C6), apa jebakan (misconception) yang kamu tanam di distraktor, dan mengapa stimulus kini fungsional.",
+  "content": "Teks pertanyaan SAJA (TIDAK BOLEH mengandung opsi A/B/C/D/E. Gunakan Markdown dan \$...\$ untuk rumus)",
+  "stimulus": "Teks wacana/stimulus SAJA (kosongkan jika tidak ada)",
+  "choices": [
+    {
+      "id": "ID asli dari pilihan jawaban (WAJIB SAMA dengan input)",
+      "content": "Teks jawaban yang diperbaiki (gunakan Markdown dan \$...\$ untuk rumus)",
+      "explanation": "Pembahasan yang sudah diperbaiki (SANGAT JELAS, LENGKAP, dan step-by-step. Gunakan Markdown dan \$...\$ untuk rumus, khusus untuk jawaban benar)"
+    }
+  ]
+}`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Tolong berikan JSON perbaikannya sekarang. Pastikan strukturnya tepat sesuai permintaan.' }
+    ];
+
+    const response = await callNineRouter(messages, { temperature: 0.2, max_tokens: 3000, response_format: { type: "json_object" } });
+    
+    // Parse the JSON result
+    try {
+      const parsed = JSON.parse(response);
+      return parsed;
+    } catch (e) {
+      // In case the model wrapped it in markdown code block
+      const cleaned = response.replace(/^```json\n/, '').replace(/\n```$/, '');
+      return JSON.parse(cleaned);
+    }
+  } catch (error) {
+    console.error('[9Router] Fix question error:', error.message);
+    throw new Error('Gagal melakukan perbaikan AI. Ada gangguan teknis sebentar.');
+  }
+};
+
+/**
+ * AI Generate Fundamental Material
+ * Generates reading material for Fundamental UTBK matching the standard text formatting
+ */
+const generateFundamentalMaterial = async (prompt, subject, topic) => {
+  try {
+    const systemPrompt = `Kamu adalah AI Pembuat Materi Belajar (Tutor UTBK) profesional untuk platform Stubia.
+Tugasmu adalah membuat materi Fundamental UTBK berdasarkan request user.
+
+Konteks:
+- Mata Pelajaran: ${subject || 'Umum'}
+- Topik/Bab: ${topic || 'Umum'}
+
+=== STANDAR FORMATTING TEXT (WAJIB DIPATUHI) ===
+1. Gunakan format **Markdown** standar untuk menebalkan (**tebal**), memiringkan (*miring*), membuat list (- atau 1.), dan membuat judul/heading (# atau ##).
+2. JANGAN menggunakan tag HTML murni (seperti <br>, <p>, <strong>, dll). Gunakan double enter / newline biasa untuk merender paragraf baru.
+3. WAJIB menggunakan format KaTeX (\$...\$ untuk inline, dan \$\$...\$\$ untuk block) untuk SEMUA rumus matematika, angka pecahan, variabel matematika (seperti \$x\$, \$y\$), atau simbol kimia.
+4. Gunakan bahasa Indonesia yang interaktif, komunikatif, dan mudah dipahami siswa SMA (seperti tutor yang sedang mengajar).
+5. Buat materi yang LENGKAP dan TERSTRUKTUR: mulai dari pengantar/konsep dasar, penjabaran materi, contoh soal & pembahasan sederhana, dan kesimpulan/tips cepat.
+6. Output HARUS BERUPA TEKS MARKDOWN MURNI (bukan JSON, bukan dibungkus dalam tag markdown \`\`\`markdown \`\`\`). Langsung berikan teks materinya.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Buatkan materi fundamental untuk: ${prompt}` }
+    ];
+
+    const response = await callNineRouter(messages, { temperature: 0.7, max_tokens: 4000 });
+    
+    // Clean up potential markdown blocks wrapping the text
+    const cleaned = response.replace(/^```markdown\n/, '').replace(/^```\n/, '').replace(/\n```$/, '');
+    return cleaned;
+  } catch (error) {
+    console.error('[9Router] Generate material error:', error.message);
+    throw new Error('Gagal melakukan generate materi AI. Ada gangguan teknis sebentar.');
+  }
+};
+
+module.exports = { chatWithStu, chatKonsultasi, chatDiscussQuestion, reviewQuestion, fixQuestion, generateFundamentalMaterial };

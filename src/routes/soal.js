@@ -14,6 +14,7 @@ const {
   isAdminUser,
   SOCIAL_VERIFY_MSG,
 } = require("../utils/latihanAccessUtil");
+const { reviewQuestion, fixQuestion } = require("../services/nineRouterService");
 
 // List Soal
 router.get("/", verifyToken, async (req, res, next) => {
@@ -817,6 +818,238 @@ router.patch("/:id/workflow", verifyToken, verifyAdmin, async (req, res, next) =
     return res.json({ success: true, message: `Status soal diubah ke ${statusLabels[status]}`, status });
   } catch (error) {
     next(error);
+  }
+});
+
+// AI Review Soal (Admin Only) — Analyze question quality with 9Router AI
+router.post("/:id/ai-review", verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch question with choices and subject title
+    const questionRes = await pool.query(
+      `SELECT q.content, q.difficulty, q.stimulus, q.question_type, q.image_url, s.title as subject_title
+       FROM questions q 
+       LEFT JOIN topics t ON q.topic_id = t.id
+       LEFT JOIN subjects s ON t.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (questionRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Soal tidak ditemukan" });
+    }
+
+    const question = questionRes.rows[0];
+
+    const choicesRes = await pool.query(
+      `SELECT label, content, is_correct, explanation
+       FROM answer_choices WHERE question_id = $1
+       ORDER BY label ASC`,
+      [id]
+    );
+
+    const reviewResult = await reviewQuestion({
+      content: question.content,
+      stimulus: question.stimulus,
+      difficulty: question.difficulty,
+      choices: choicesRes.rows,
+      questionType: question.question_type,
+      subjectTitle: question.subject_title,
+    });
+
+    logAdminActivity(req, 'VIEW', 'AI_REVIEW',
+      `Soal ID: ${id}`,
+      `Admin melakukan AI Review pada soal`
+    );
+
+    return res.json({
+      success: true,
+      review: reviewResult,
+    });
+  } catch (error) {
+    console.error('[AI Review] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal melakukan review AI. Silakan coba lagi.',
+    });
+  }
+});
+
+// AI Fix Soal (Admin Only) — Auto-fix question using 9Router AI
+router.post("/:id/ai-fix", verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reviewNotes } = req.body; // Pass the review result as context
+
+    // Fetch question with choices and subject title
+    const questionRes = await pool.query(
+      `SELECT q.id, q.content, q.difficulty, q.stimulus, q.question_type, q.image_url, s.title as subject_title
+       FROM questions q 
+       LEFT JOIN topics t ON q.topic_id = t.id
+       LEFT JOIN subjects s ON t.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (questionRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Soal tidak ditemukan" });
+    }
+
+    const question = questionRes.rows[0];
+
+    const choicesRes = await pool.query(
+      `SELECT id, label, content, is_correct, explanation
+       FROM answer_choices WHERE question_id = $1
+       ORDER BY label ASC`,
+      [id]
+    );
+
+    const fixResult = await fixQuestion({
+      content: question.content,
+      stimulus: question.stimulus,
+      choices: choicesRes.rows,
+      questionType: question.question_type,
+      difficulty: question.difficulty,
+      subjectTitle: question.subject_title,
+    }, reviewNotes);
+
+    // Update the question
+    await pool.query(
+      `UPDATE questions SET content = $1, stimulus = $2 WHERE id = $3`,
+      [fixResult.content, fixResult.stimulus || null, id]
+    );
+
+    // Update the choices
+    if (fixResult.choices && Array.isArray(fixResult.choices)) {
+      for (const choice of fixResult.choices) {
+        await pool.query(
+          `UPDATE answer_choices SET content = $1, explanation = $2 WHERE id = $3`,
+          [choice.content, choice.explanation || null, choice.id]
+        );
+      }
+    }
+
+    logAdminActivity(req, 'UPDATE', 'AI_FIX',
+      `Soal ID: ${id}`,
+      `Admin memperbaiki soal menggunakan AI`
+    );
+
+    return res.json({
+      success: true,
+      message: 'Soal berhasil diperbaiki oleh AI',
+    });
+  } catch (error) {
+    console.error('[AI Fix] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal melakukan perbaikan AI. Silakan coba lagi.',
+    });
+  }
+});
+
+// AI Fix Preview Soal (Admin Only) — Returns proposed fixes without saving
+router.post("/:id/ai-fix-preview", verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reviewNotes } = req.body;
+
+    const questionRes = await pool.query(
+      `SELECT q.id, q.content, q.difficulty, q.stimulus, q.question_type, q.image_url, s.title as subject_title
+       FROM questions q 
+       LEFT JOIN topics t ON q.topic_id = t.id
+       LEFT JOIN subjects s ON t.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (questionRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Soal tidak ditemukan" });
+    }
+
+    const question = questionRes.rows[0];
+
+    const choicesRes = await pool.query(
+      `SELECT id, label, content, is_correct, explanation
+       FROM answer_choices WHERE question_id = $1
+       ORDER BY label ASC`,
+      [id]
+    );
+
+    const original = {
+      content: question.content,
+      stimulus: question.stimulus,
+      choices: choicesRes.rows
+    };
+
+    const fixResult = await fixQuestion({
+      content: question.content,
+      stimulus: question.stimulus,
+      choices: choicesRes.rows,
+      questionType: question.question_type,
+      difficulty: question.difficulty,
+      subjectTitle: question.subject_title,
+    }, reviewNotes);
+
+    return res.json({
+      success: true,
+      data: {
+        original,
+        fixed: fixResult
+      }
+    });
+  } catch (error) {
+    console.error('[AI Fix Preview] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal melakukan preview perbaikan AI.',
+    });
+  }
+});
+
+// AI Fix Apply (Admin Only) — Save specifically selected fixes
+router.post("/:id/ai-fix-apply", verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { content, stimulus, choices } = req.body;
+
+    if (content !== undefined) {
+      await pool.query(`UPDATE questions SET content = $1 WHERE id = $2`, [content, id]);
+    }
+    if (stimulus !== undefined) {
+      await pool.query(`UPDATE questions SET stimulus = $1 WHERE id = $2`, [stimulus || null, id]);
+    }
+
+    if (choices && Array.isArray(choices)) {
+      for (const choice of choices) {
+        if (choice.id) {
+          const updates = [];
+          const values = [];
+          let paramIdx = 1;
+          
+          if (choice.content !== undefined) {
+            updates.push(`content = $${paramIdx++}`);
+            values.push(choice.content);
+          }
+          if (choice.explanation !== undefined) {
+            updates.push(`explanation = $${paramIdx++}`);
+            values.push(choice.explanation || null);
+          }
+          
+          if (updates.length > 0) {
+            values.push(choice.id);
+            await pool.query(`UPDATE answer_choices SET ${updates.join(', ')} WHERE id = $${paramIdx}`, values);
+          }
+        }
+      }
+    }
+
+    logAdminActivity(req, 'UPDATE', 'AI_FIX_APPLY', `Soal ID: ${id}`, `Admin menerapkan sebagian perbaikan AI ke soal`);
+    
+    return res.json({ success: true, message: 'Perbaikan yang dipilih berhasil diterapkan!' });
+  } catch (error) {
+    console.error('[AI Fix Apply] Error:', error.message);
+    return res.status(500).json({ success: false, error: 'Gagal menerapkan perbaikan AI.' });
   }
 });
 

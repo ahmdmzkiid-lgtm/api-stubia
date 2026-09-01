@@ -18,7 +18,7 @@ const chatDiscussQuestionWithDeepSeek = async (message, questionContext, history
       .map(c => `${c.label}. ${c.content}${c.is_correct ? ' ✓ (jawaban benar)' : ''}`)
       .join('\n');
 
-    const systemPrompt = `Kamu adalah Bia, tutor AI resmi dari platform Stubia yang KHUSUS membantu siswa membahas satu soal UTBK/SNBT.
+    const systemPrompt = `Kamu adalah Bia, tutor AI resmi dari platform Stubia yang KHUSUS membantu siswa membahas soal ujian/latihan.
 Gunakan bahasa Indonesia yang santai, ramah, dan bersahabat (gunakan 'aku' dan 'kamu').
 
 === KONTEKS SOAL YANG SEDANG DIBAHAS ===

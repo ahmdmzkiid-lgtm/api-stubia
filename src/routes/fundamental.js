@@ -6,6 +6,7 @@ const { isAdminUser, hasActiveFundamentalUtbkSubscription } = require('../utils/
 const { logAdminActivity } = require('../utils/activityLogger');
 const multer = require('multer');
 const XLSX = require('xlsx');
+const { generateFundamentalMaterial } = require('../services/nineRouterService');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1079,6 +1080,38 @@ router.patch('/admin/materials/:id', [verifyToken, verifyAdmin], async (req, res
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     next(error);
+  }
+});
+
+/**
+ * POST /api/fundamental/admin/materials/generate-ai
+ * Generates fundamental material content using AI
+ */
+router.post('/admin/materials/generate-ai', [verifyToken, verifyAdmin], async (req, res, next) => {
+  try {
+    const { prompt, subject_id, topic_id } = req.body;
+    
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: 'Prompt atau judul materi tidak boleh kosong' });
+    }
+
+    let subjectTitle = 'Umum';
+    let topicTitle = 'Umum';
+
+    if (subject_id) {
+      const subjRes = await pool.query('SELECT title FROM subjects WHERE id = $1', [subject_id]);
+      if (subjRes.rows.length > 0) subjectTitle = subjRes.rows[0].title;
+    }
+
+    const generatedContent = await generateFundamentalMaterial(prompt, subjectTitle, topicTitle);
+
+    res.json({
+      success: true,
+      data: generatedContent
+    });
+  } catch (error) {
+    console.error('[AI Gen Material] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message || 'Gagal melakukan generate materi AI' });
   }
 });
 

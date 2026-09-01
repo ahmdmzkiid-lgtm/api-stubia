@@ -80,13 +80,17 @@ router.post('/discuss', verifyToken, chatLimiter, async (req, res, next) => {
     const user = userRes.rows[0];
 
     const isAdmin = user && user.role === 'admin';
-    let hasAccess = user && (isAdmin || user.current_plan === 'premium' || user.current_plan?.startsWith('utbk_'));
+    let hasAccess = user && (isAdmin || (user.current_plan && user.current_plan !== 'gratis' && user.current_plan !== 'free'));
 
     if (!hasAccess && user) {
       const subRes = await pool.query(
         `SELECT 1 FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-         WHERE s.user_id = $1 AND s.status = 'active' AND s.expires_at > NOW()
-         AND (p.target_type = 'utbk' OR p.target_type = 'all')
+         WHERE s.user_id = $1 AND s.status = 'active'
+         AND (
+           (p.plan_type != 'quota' AND (s.expires_at > NOW() OR s.expires_at IS NULL))
+           OR 
+           (p.plan_type = 'quota' AND s.quota_remaining > 0)
+         )
          LIMIT 1`,
         [req.user.id]
       );
@@ -99,7 +103,7 @@ router.post('/discuss', verifyToken, chatLimiter, async (req, res, next) => {
       return res.status(403).json({
         success: false,
         requires_premium: true,
-        error: 'Fitur Tutor AI (Bia) memerlukan Paket Premium UTBK. Silakan upgrade paket belajar Anda.'
+        error: 'Fitur Tutor AI (Bia) memerlukan Paket Premium. Silakan upgrade paket belajar Anda.'
       });
     }
 
