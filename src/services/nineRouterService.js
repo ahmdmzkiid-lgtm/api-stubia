@@ -464,7 +464,10 @@ Kamu HARUS memberikan review dalam format PERSIS seperti di bawah ini. JANGAN me
 3. Analisis harus SPESIFIK merujuk pada isi soal, BUKAN generik.
 4. Gunakan bahasa Indonesia profesional.
 5. JANGAN mengarang informasi yang tidak ada di soal.
-6. Berikan review yang SANGAT KRITIS, TAJAM, dan JUJUR. Jangan terlalu memuji jika soal belum setara level analitis UTBK/SNBT sesungguhnya.`;
+6. Berikan review yang SANGAT KRITIS, TAJAM, dan JUJUR. Jangan terlalu memuji jika soal belum setara level analitis UTBK/SNBT sesungguhnya.
+7. ATURAN NOTASI MATEMATIKA:
+   - Gunakan tanda dollar berpasangan $...$ untuk setiap rumus/variabel matematika (contoh: $4ct = 3ds$, $\implies$, $P = 105$, $\frac{a}{b}$, $\gcd(c,s) = 5$).
+   - JANGAN PERNAH memasukkan kalimat/kata-kata bahasa Indonesia ke dalam tanda dollar ($...$). Tanda dollar hanya untuk simbol/rumus matematika.`;
 
     const userMessage = 'Tolong review soal di atas secara menyeluruh berdasarkan kriteria yang sudah ditentukan.';
 
