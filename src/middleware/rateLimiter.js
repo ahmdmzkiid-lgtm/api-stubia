@@ -66,10 +66,23 @@ const pinLimiter = rateLimit({
   },
 });
 
+// Rate limiter for Career Applications (prevent spamming form submissions)
+const careerApplyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5, // Limit each IP to 5 applications per hour
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Terlalu banyak pengiriman lamaran dari IP ini. Silakan coba lagi dalam 1 jam.',
+  },
+});
+
 module.exports = {
   authLimiter,
   voucherLimiter,
   publicUploadLimiter,
   chatLimiter,
   pinLimiter,
+  careerApplyLimiter,
 };

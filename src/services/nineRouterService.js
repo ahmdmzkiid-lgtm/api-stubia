@@ -599,4 +599,314 @@ Konteks:
   }
 };
 
-module.exports = { chatWithStu, chatKonsultasi, chatDiscussQuestion, reviewQuestion, fixQuestion, generateFundamentalMaterial };
+/**
+ * Specialized Kemendikdasmen Prompt Rules per Mata Pelajaran & Jenjang (SD, SMP, SMA)
+ * Sesuai Standar BSKAP Kemendikdasmen & Kurikulum Merdeka
+ */
+const getTkaKemendikdasmenRules = (subjectTitle = '', educationLevel = 'SMA') => {
+  const sub = subjectTitle.toLowerCase();
+  const lvl = (educationLevel || 'SMA').toUpperCase();
+
+  let subjectRules = '';
+
+  // 1. MATEMATIKA & MATEMATIKA TINGKAT LANJUT
+  if (sub.includes('matematika')) {
+    if (lvl === 'SD') {
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - MATEMATIKA (JENJANG SD)*:
+- Domain: Bilangan (cacah, bulat, pecahan dasar), Pengukuran (panjang, berat, waktu, luas/keliling bangun datar sederhana), Geometri bangun datar/ruang sederhana, Analisis Data dasar (diagram batang/piktogram).
+- Karakteristik Soal: Wajib berbasis masalah kontekstual yang dekat dengan kehidupan sehari-hari anak (bermain, berbelanja, kegiatan sekolah).
+- Tingkat Penalaran: Utamakan pemahaman konsep dan pemecahan masalah sederhana (bukan hitungan mekanik hafalan).
+- KaTeX: Wajib gunakan $...$ untuk semua angka pecahan, operasi hitung, atau simbol matematika (misal: $\\frac{1}{2}$, $25 \\times 4$).`;
+    } else if (lvl === 'SMP') {
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - MATEMATIKA (JENJANG SMP)*:
+- Domain: Aljabar (bentuk aljabar, PLSV/PtLSV, SPLDV, relasi & fungsi, persamaan garis lurus), Aritmatika Sosial (untung/rugi, diskon, pajak, bunga tunggal), Geometri & Pengukuran (teorema Pythagoras, lingkaran, bangun ruang sisi datar/lengkung, transformasi geometri), Statistika & Peluang.
+- Karakteristik Soal: Soal HOTS berbasis studi kasus/aplikasi nyata (perencanaan anggaran, denah arsitektur, survei data).
+- Distraktor: Pengecoh harus berasal dari kesalahan perhitungan konsep aljabar umum (salah tanda minus, salah memindah ruas, salah menerapkan rumus keliling vs luas).`;
+    } else {
+      const isLanjut = sub.includes('lanjut');
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - MATEMATIKA ${isLanjut ? 'TINGKAT LANJUT' : 'UMUM'} (JENJANG SMA)*:
+- Domain: ${isLanjut 
+  ? 'Kalkulus (diferensial, integral substitusi/parsial, limit trigonometri), Polinomial & Faktorisasi, Vektor analitis & Geometri Ruang Dimensi Tiga, Matriks & Sistem Persamaan Linier, Trigonometri analitis'
+  : 'Fungsi (Komposisi & Invers), Eksponen & Logaritma, Barisan & Deret (Aritmatika, Geometri, Keuangan), Trigonometri dasar, Statistika inferensial dasar & Aturan Pencacahan/Peluang'}.
+- Karakteristik Soal: Penalaran tingkat tinggi (C4-C5), pemodelan matematis dari fenomena sains/sosial/ekonomi.
+- Ketepatan Notasi: WAJIB gunakan KaTeX $...$ dan $$...$$ yang 100% presisi. Pastikan variabel, persamaan, dan batas-batas integral/limit terdefinisi secara ketat.
+- Distraktor: Harus mencerminkan miskonsepsi rumus lanjutan (misal: lupa aturan rantai pada turunan, salah sifat logaritma).`;
+    }
+  }
+
+  // 2. BAHASA INDONESIA & BAHASA INDONESIA TINGKAT LANJUT
+  else if (sub.includes('bahasa indonesia') || sub.includes('indonesia')) {
+    if (lvl === 'SD') {
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - BAHASA INDONESIA (JENJANG SD)*:
+- Domain: Membaca dan memahami isi teks fiksi/cerita anak atau teks informasi pendek, menemukan ide pokok paragraf, makna kata kontekstual, penggunaan ejaan dasar (huruf kapital, tanda titik, tanda tanya).
+- Karakteristik Stimulus: Bacaan harus ramah anak, mendidik, santun, dan panjang teks proporsional (1-2 paragraf).
+- Pertanyaan: Uji kemampuan menyimpulkan pesan moral, menemukan informasi tersurat dan tersirat sederhana.`;
+    } else if (lvl === 'SMP') {
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - BAHASA INDONESIA (JENJANG SMP)*:
+- Domain: Teks Deskripsi, Teks Narasi/Cerpen, Teks Eksposisi, Teks Prosedur, Teks Tanggapan, Teks Diskusi, Kalimat Efektif, Konjungsi antarklausa/antarkalimat, Fakta vs Opini.
+- Karakteristik Soal: Uji kemampuan mengidentifikasi gagasan utama, koherensi paragraf, makna ungkapan/majas, dan kritik terhadap isi bacaan.
+- PUEBI/EYD V: Pastikan pilihan jawaban dan stimulus mematuhi kaidah penulisan baku.`;
+    } else {
+      const isLanjut = sub.includes('lanjut');
+      subjectRules = `\n*STANDAR KEMENDIKDASMEN - BAHASA INDONESIA ${isLanjut ? 'TINGKAT LANJUT' : 'UMUM'} (JENJANG SMA)*:
+- Domain: ${isLanjut 
+  ? 'Analisis Teks Akademik/Esai Ilmiah, Kritik dan Esai Sastra (prosa, puisi, drama), Analisis Struktur Makro dan Mikro Teks, Retorika, Stilistika'
+  : 'Teks Argumentasi, Editorial, Artikel Opini, Teks Laporan Hasil Observasi, Resensi, Negosiasi, Inferensi Makna Mendalam, Evaluasi Asumsi Penulis, Validitas Argumen'}.
+- Standar Literasi: Teks stimulus WAJIB bermakna, kritis, dan berbasis wacana aktual/ilmiah. Pertanyaan TIDAK BOLEH bersifat hafalan definisi atau pencarian kata verbatim (C1), melainkan evaluasi sudut pandang, simpulan logis, dan sintesis informasi.`;
+    }
+  }
+
+  // 3. BAHASA INGGRIS & BAHASA INGGRIS TINGKAT LANJUT
+  else if (sub.includes('inggris') || sub.includes('english')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - BAHASA INGGRIS (JENJANG SMA / ADVANCED)*:
+- Domain: Reading Comprehension across genre (Analytical Exposition, Discussion Text, Report, Narrative, Hortatory, News Item), Communicative Purpose, Tone and Attitude of the Author, Detailed & Implicit Information, Word Meaning in Context, Pronoun Referencing, Text Cohesion & Organization.
+- Standar Teks: Autentik, berbobot intelektual setara CEFR level B1-B2.
+- Karakteristik Opsi: Opsi pengecoh harus memiliki kemiripan struktur tata bahasa (paralel) namun mengandung distorsi logika atau over-generalization dari teks.`;
+  }
+
+  // 4. FISIKA (SMA - IPA)
+  else if (sub.includes('fisika')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - FISIKA (JENJANG SMA)*:
+- Domain: Kinematika & Dinamika Gerak (Hukum Newton, Gravitasi, Gerak Melingkar), Usaha, Energi & Momentum, Fluida Statis & Dinamis, Termodinamika & Teori Kinetik Gas, Gelombang Mekanik, Bunyi & Cahaya, Listrik Statis & Dinamis, Kemagnetan & Induksi Faraday, Fisika Inti & Relativitas.
+- Karakteristik Soal: Fenomenologis dan eksperimental. Stimulus harus menggambarkan peristiwa alam atau eksperimen laboratorium dengan data (grafik, tabel percobaan, atau diagram fisis).
+- Ketepatan Rumus & Satuan: WAJIB gunakan satuan SI yang konsisten, konvensi tanda positif/negatif yang jelas, serta formula KaTeX $...$ yang tepat.
+- Distraktor: Harus bersumber dari kekeliruan konsep (misal: mengabaikan gaya gesek saat licin/kasar, salah menerapkan hukum kekekalan momentum, keliru proyeksi vektor).`;
+  }
+
+  // 5. KIMIA (SMA - IPA)
+  else if (sub.includes('kimia')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - KIMIA (JENJANG SMA)*:
+- Domain: Struktur Atom & Tabel Periodik, Ikatan Kimia & Gaya Antarmolekul, Stoikiometri & Hukum Gas, Termokimia (Hukum Hess, Kalorimetri), Laju Reaksi & Teori Tumbukan, Kesetimbangan Kimia (Le Chatelier), Asam-Basa, Buffer & Hidrolisis, Ksp, Redoks & Elektrokimia (Sel Volta & Elektrolisis), Kimia Organik (Gugus Fungsi & Makromolekul).
+- Karakteristik Soal: Menghubungkan tiga level representasi kimia (Makroskopis - Submikroskopis - Simbolik).
+- Ketepatan Reaksi: Persamaan reaksi kimia WAJIB setara (balanced) beserta fasa zatnya jika relevan. Gunakan notasi KaTeX untuk indeks rumus (misal: $\\text{H}_2\\text{SO}_4$).
+- Distraktor: Pengecoh berasal dari kesalahan perbandingan koefisien reaksi, salah menentukan asam/basa konjugasi, atau salah fasa zat.`;
+  }
+
+  // 6. BIOLOGI (SMA - IPA)
+  else if (sub.includes('biologi')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - BIOLOGI (JENJANG SMA)*:
+- Domain: Biologi Sel (Organel, Transpor Membran), Metabolisme (Enzim, Katabolisme, Anabolisme), Genetika & Sintesis Protein (DNA, RNA, Transkripsi/Translasi), Pola Hereditas & Silsilah (Pedigree), Fisiologi Sistem Organ Manusia & Tumbuhan, Ekologi & Aliran Energi, Bioteknologi & Rekayasa Genetika, Evolusi.
+- Karakteristik Soal: Berbasis data riset atau fenomena biologis (diagram siklus, grafik enzim, tabel hasil persilangan genetika).
+- Analisis HOTS: Menuntut siswa menganalisis hubungan sebab-akibat biologis (misal: efek inhibitor terhadap kerja enzim, mutasi gen terhadap pembentukan protein), BUKAN sekadar menghafal klasifikasi taksonomi.`;
+  }
+
+  // 7. EKONOMI (SMA - IPS)
+  else if (sub.includes('ekonomi')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - EKONOMI (JENJANG SMA)*:
+- Domain: Kelangkaan & Biaya Peluang, Mekanisme Pasar (Permintaan, Penawaran, Elastisitas, Keseimbangan Pasar), Perilaku Konsumen & Produsen, Pendapatan Nasional & Kesenjangan (Gini Ratio), Inflasi & Kebijakan Moneter/Fiskal, Ketenagakerjaan & Upah, Perdagangan Internasional & Kurs Valuta, APBN/APBD, Akuntansi Perusahaan Jasa & Dagang (Persamaan Dasar, Jurnal Umum, Buku Besar, Penyesuaian, Kertas Kerja).
+- Karakteristik Soal: Berbasis data empiris (tabel PDB, kurva pergeseran harga, neraca pembayaran, bukti transaksi keuangan).
+- Perhitungan: Rumus elastisitas, fungsi penerimaan/biaya, dan pencatatan debit-kredit akuntansi harus 100% presisi.`;
+  }
+
+  // 8. SOSIOLOGI (SMA - IPS)
+  else if (sub.includes('sosiologi')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - SOSIOLOGI (JENJANG SMA)*:
+- Domain: Nilai & Norma Sosial, Sosialisasi & Penyimpangan, Struktur & Diferensiasi Sosial, Stratifikasi Sosial, Mobilitas Sosial, Kelompok Sosial & Partikularisme, Konflik, Kekerasan & Perdamaian, Perubahan Sosial di Era Digital & Globalisasi, Kearifan Lokal & Pemberdayaan Komunitas, Metode Penelitian Sosial.
+- Karakteristik Soal: Berbasis studi kasus nyata dinamika masyarakat Indonesia (isu urbanisasi, segregasi sosial, konflik agraria, fenomena medsos).
+- Tingkat Penalaran: Evaluasi harus menggunakan perspektif sosiologis (teori fungsionalisme struktural, teori konflik, interaksionisme simbolik), bukan prasangka moral atau pandangan awam.`;
+  }
+
+  // 9. GEOGRAFI (SMA - IPS)
+  else if (sub.includes('geografi')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - GEOGRAFI (JENJANG SMA)*:
+- Domain: Pendekatan, Konsep & Prinsip Geografi, Pemetaan, Penginderaan Jauh & SIG, Dinamika Litosfer (Tektonisme, Vulkanisme, Seisme, Pelapukan), Dinamika Atmosfer (Unsur Cuaca, Klasifikasi Iklim, Perubahan Iklim Global), Dinamika Hidrosfer (Siklus Air, DAS, Perairan Darat & Laut), Biosfer & Bioma, Antroposfer & Dinamika Kependudukan, Pola Keruangan Desa-Kota, Mitigasi Bencana Alam & Pembangunan Berkelanjutan.
+- Karakteristik Soal: Analisis spasial (ruang) berbasis peta tematik, citra inderaja, skema morfologi bentang alam, atau piramida penduduk.`;
+  }
+
+  // 10. SEJARAH (SMA - IPS)
+  else if (sub.includes('sejarah')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - SEJARAH (JENJANG SMA)*:
+- Domain: Konsep Berpikir Sejarah (Diakronik, Sinkronik, Kausalitas, Periodisasi), Sumber Sejarah & Historiografi, Kerajaan Maritim Hindu-Buddha & Islam di Nusantara, Kolonialisme & Perlawanan Daerah, Kebangkitan Nasional & Organisasi Pergerakan, Masa Pendudukan Jepang & Proklamasi, Perjuangan Mempertahankan Kemerdekaan, Demokrasi Parlementer & Terpimpin, Orde Baru, Reformasi 1998, Perang Dunia & Dampaknya bagi Indonesia.
+- Karakteristik Soal: Menghindari pertanyaan hafalan tahun/tanggal mutlak (C1). Wajib menuntut analisis kausalitas (faktor pemicu, dampak jangka panjang, dan korelasi antarperistiwa sejarah).`;
+  }
+
+  // 11. PPKN / PENDIDIKAN PANCASILA (SMA - IPS)
+  else if (sub.includes('ppkn') || sub.includes('pancasila')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - PENDIDIKAN PANCASILA / PPKN (JENJANG SMA)*:
+- Domain: Nilai-nilai Pancasila dalam Praktik Penyelenggaraan Negara, UUD NRI Tahun 1945 & Dinamika Ketatanegaraan, Pelanggaran & Penegakan Hak Asasi Manusia (HAM), Sistem Hukum & Peradilan Nasional, Integrasi Nasional dalam Bingkai Bhinneka Tunggal Ika, Wawasan Nusantara & Ketahanan Nasional.
+- Karakteristik Soal: Kasus dilema hukum, analisis hak dan kewajiban warga negara, pengujian kasus konstitusi di masyarakat.`;
+  }
+
+  // 12. BAHASA ASING (Arab, Jepang, Jerman, Prancis, Mandarin, Korea)
+  else if (sub.includes('arab') || sub.includes('jepang') || sub.includes('jerman') || sub.includes('prancis') || sub.includes('mandarin') || sub.includes('korea')) {
+    subjectRules = `\n*STANDAR KEMENDIKDASMEN - BAHASA ASING PILIHAN (${subjectTitle.toUpperCase()} - SMA)*:
+- Domain: Pemahaman wacana dan dialog situasional autentik, struktur gramatika komunikatif, kosakata tematis kontekstual, fungsi sosial tindak tutur (speech acts).
+- Ortografi: Pastikan penulisan huruf/aksara dan harakat/tanda baca asing 100% akurat tanpa kesalahan tipografi.`;
+  }
+
+  return `\n*STANDAR JENJANG (${lvl})*: Seluruh analisis soal, estimasi tingkat kesulitan, dan kosa kata wajib disesuaikan dengan perkembangan kognitif siswa jenjang ${lvl}.${subjectRules}`;
+};
+
+/**
+ * AI Review for TKA (Tes Kemampuan Akademik) according to Kemendikdasmen standards
+ */
+const reviewTkaQuestion = async (questionData) => {
+  try {
+    const { content, stimulus, difficulty, choices, questionType, subjectTitle, educationLevel } = questionData;
+
+    const choicesText = (choices || [])
+      .map(c => `${c.label}. ${c.content}${c.is_correct ? ' ✅ (jawaban benar)' : ''}${c.is_correct && c.explanation ? `\n   Pembahasan: ${c.explanation}` : ''}`)
+      .join('\n');
+
+    const difficultyLabel = difficulty === 'easy' ? 'Mudah' : difficulty === 'hard' ? 'Sulit' : 'Sedang';
+
+    const typeLabel = questionType === 'complex_mc_tf' ? 'Benar/Salah Kompleks' :
+                      questionType === 'complex_mc_multi' ? 'Pilihan Ganda Multi-Jawaban' :
+                      questionType === 'short_answer' ? 'Isian Singkat' : 'Pilihan Ganda';
+
+    const kemendikdasmenRules = getTkaKemendikdasmenRules(subjectTitle, educationLevel);
+
+    const systemPrompt = `Kamu adalah Quality Assurance AI ahli yang bertugas me-review soal Tes Kemampuan Akademik (TKA) Jenjang ${educationLevel || 'SMA'} untuk platform Stubia sesuai standar kurikulum dan asesmen Kemendikdasmen (Kementerian Pendidikan Dasar dan Menengah).
+Tugasmu adalah menganalisis SATU soal secara menyeluruh dan memberikan review terstruktur berdasarkan standar kompetensi dan pedagogis Kemendikdasmen.${kemendikdasmenRules}
+
+=== SOAL TKA YANG AKAN DI-REVIEW ===
+Jenjang Pendidikan: ${educationLevel || 'SMA'}
+Mata Pelajaran: ${subjectTitle || 'Umum'}
+Tipe Soal: ${typeLabel}
+Tingkat Kesulitan: ${difficultyLabel}
+${stimulus ? `Stimulus/Wacana:\n${stimulus}\n` : ''}
+Soal: ${content}
+
+Pilihan Jawaban:
+${choicesText}
+
+=== KRITERIA REVIEW KEMENDIKDASMEN (WAJIB DIPATUHI) ===
+
+Kamu HARUS memberikan review dalam format PERSIS seperti di bawah ini. JANGAN mengubah format, header, atau struktur.
+
+**FORMAT OUTPUT (WAJIB):**
+
+📝 KERAPIHAN PENULISAN & KAIDAH BAHASA
+[Analisis: cek typo, tanda baca, EYD/PUEBI Edisi V, penggunaan huruf kapital, tanda baca di pilihan jawaban, dan konsistensi terminologi ilmiah baku.]
+
+📋 KESESUAIAN STANDAR KEMENDIKDASMEN & TINGKAT HOTS
+[Analisis: apakah soal sesuai Capaian Pembelajaran (CP) Kurikulum Merdeka Kemendikdasmen jenjang ${educationLevel || 'SMA'}? Evaluasi level kognitif berdasarkan Taksonomi Bloom (C4-Analisis, C5-Evaluasi, C6-Kreasi). Soal TIDAK BOLEH sekadar menguji hafalan mekanik (C1-C2). Apakah stimulus benar-benar fungsional dan kontekstual atau hanya hiasan?]
+
+🔤 KUALITAS PILIHAN JAWABAN & DISTRAKTOR
+[Analisis: apakah opsi pengecoh (distraktor) disusun berdasarkan miskonsepsi umum peserta didik (common student misconceptions)? Pastikan opsi homogen, masuk akal, dan tidak ada kunci ganda atau ambiguitas.]
+
+💡 KUALITAS PEMBAHASAN & SCAFFOLDING
+[Analisis: apakah pembahasan mendidik dan menyajikan alur berpikir (scaffolding) step-by-step yang mudah dipahami? Apakah pembahasan menjelaskan konsep mendasar dan alasan mengapa kunci jawaban benar serta opsi lain salah?]
+
+⭐ SKOR KELAYAKAN: [angka 1-10]/10
+
+🎯 REKOMENDASI PERBAIKAN:
+[Berikan 2-5 poin rekomendasi konkret dan actionable sesuai standar Kemendikdasmen.]
+
+=== ATURAN KETAT ===
+1. WAJIB gunakan format di atas PERSIS. Jangan tambahkan section lain.
+2. WAJIB berikan skor 1-10 dengan format "⭐ SKOR KELAYAKAN: X/10". Berikan skor RENDAH (< 7) jika soal hanya sekadar hafalan atau stimulus tidak fungsional.
+3. Analisis harus SPESIFIK merujuk pada isi soal dan mata pelajaran ${subjectTitle || 'TKA'}, BUKAN generik.
+4. Gunakan bahasa Indonesia profesional dan edukatif.
+5. JANGAN mengarang informasi yang tidak ada di soal.
+6. Berikan review yang SANGAT KRITIS, TAJAM, dan JUJUR.
+7. ATURAN NOTASI MATEMATIKA:
+   - Gunakan tanda dollar berpasangan $...$ untuk setiap rumus/variabel matematika (contoh: $f(x) = 2x + 1$, $\\frac{a}{b}$, $P = 105$).
+   - JANGAN PERNAH memasukkan kalimat/kata-kata bahasa Indonesia panjang ke dalam tanda dollar ($...$). Tanda dollar hanya untuk simbol/rumus matematika.`;
+
+    const userMessage = 'Tolong review soal TKA di atas secara menyeluruh berdasarkan standar asesmen Kemendikdasmen.';
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage }
+    ];
+
+    return await callNineRouter(messages, { temperature: 0.3, max_tokens: 3000 });
+  } catch (error) {
+    console.error('[9Router] Review TKA question error:', error.message);
+    throw new Error('Gagal melakukan review AI TKA. Ada gangguan teknis sebentar.');
+  }
+};
+
+/**
+ * AI Fix TKA Question
+ * Automatically applies fixes to a TKA question based on Kemendikdasmen AI review
+ */
+const fixTkaQuestion = async (questionData, reviewNotes) => {
+  try {
+    const { content, stimulus, choices, questionType, difficulty, subjectTitle, educationLevel } = questionData;
+
+    const difficultyLabel = difficulty === 'easy' ? 'Mudah' : difficulty === 'hard' ? 'Sulit' : 'Sedang';
+
+    const choicesText = (choices || [])
+      .map(c => `ID: ${c.id}\nLabel: ${c.label}\nIsi: ${c.content}\nBenar: ${c.is_correct}\nPembahasan: ${c.explanation || ''}`)
+      .join('\n\n');
+
+    const kemendikdasmenRules = getTkaKemendikdasmenRules(subjectTitle, educationLevel);
+
+    const systemPrompt = `Kamu adalah AI Pembuat Soal yang bertugas MEMPERBAIKI soal Tes Kemampuan Akademik (TKA) Jenjang ${educationLevel || 'SMA'} berdasarkan review standar Kemendikdasmen yang diberikan.
+Tugasmu adalah menghasilkan versi perbaikan dari soal ini dalam format JSON yang valid.${kemendikdasmenRules}
+
+=== SOAL TKA ASLI ===
+Jenjang: ${educationLevel || 'SMA'}
+Mata Pelajaran: ${subjectTitle || 'Umum'}
+Tipe Soal: ${questionType || 'multiple_choice'}
+Tingkat Kesulitan: ${difficultyLabel}
+${stimulus ? `Stimulus/Wacana Asli:\n${stimulus}\n` : ''}
+Soal Asli: ${content}
+
+Pilihan Jawaban Asli:
+${choicesText}
+
+=== CATATAN REVIEW KEMENDIKDASMEN ===
+${reviewNotes || 'Perbaiki typo, tingkatkan level HOTS, perbaiki distraktor pengecoh, dan lengkapi pembahasan sesuai standar Kemendikdasmen.'}
+
+=== FORMAT OUTPUT (WAJIB JSON VALID) ===
+Kamu HARUS mengembalikan HANYA sebuah JSON object dengan struktur berikut, tanpa teks tambahan di luar JSON:
+{
+  "stimulus": "string (stimulus yang sudah diperbaiki atau null jika soal tidak memerlukan stimulus)",
+  "content": "string (teks pertanyaan yang sudah diperbaiki)",
+  "choices": [
+    {
+      "id": "string (ID asli pilihan jawaban - JANGAN UBAH ID)",
+      "label": "string (label A/B/C/D/E)",
+      "content": "string (isi pilihan jawaban yang sudah diperbaiki)",
+      "explanation": "string (pembahasan detail untuk pilihan ini, jelaskan mengapa benar atau mengapa salah)"
+    }
+  ]
+}
+
+=== ATURAN PERBAIKAN KEMENDIKDASMEN ===
+1. PERTAHANKAN ID setiap pilihan jawaban agar sistem database dapat mengupdate dengan benar.
+2. Perbaiki semua kesalahan EYD/PUEBI, ketidakkonsistenan huruf kapital, dan tanda baca.
+3. Tingkatkan kualitas stimulus agar kontekstual dan fungsional sesuai standar Kemendikdasmen jenjang ${educationLevel || 'SMA'}.
+4. Perbaiki opsi pengecoh agar merefleksikan miskonsepsi konsep yang nyata.
+5. Lengkapi pembahasan untuk SETIAP opsi (terutama opsi benar wajib memiliki penjelasan langkah demi langkah / scaffolding konseptual yang jelas).
+6. Gunakan notasi KaTeX ($...$ atau $$...$$) untuk setiap rumus/simbol matematika. JANGAN memasukkan teks bahasa Indonesia ke dalam tanda dollar ($...$).
+7. JANGAN mengubah jawaban yang benar menjadi salah.
+8. Output HARUS berupa JSON murni yang valid tanpa awalan atau akhiran teks apapun.`;
+
+    const userMessage = 'Tolong perbaiki soal TKA di atas berdasarkan catatan review Kemendikdasmen. Kembalikan dalam format JSON yang sudah ditentukan.';
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage }
+    ];
+
+    const response = await callNineRouter(messages, { temperature: 0.2, max_tokens: 4000 });
+
+    try {
+      const parsed = JSON.parse(response);
+      return parsed;
+    } catch (e) {
+      const cleaned = response.replace(/^```json\n/, '').replace(/^```\n/, '').replace(/\n```$/, '');
+      return JSON.parse(cleaned);
+    }
+  } catch (error) {
+    console.error('[9Router] Fix TKA question error:', error.message);
+    throw new Error('Gagal melakukan perbaikan AI TKA. Ada gangguan teknis sebentar.');
+  }
+};
+
+module.exports = { 
+  chatWithStu, 
+  chatKonsultasi, 
+  chatDiscussQuestion, 
+  reviewQuestion, 
+  fixQuestion, 
+  generateFundamentalMaterial,
+  reviewTkaQuestion,
+  fixTkaQuestion,
+  getTkaKemendikdasmenRules
+};
+

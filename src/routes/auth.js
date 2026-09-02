@@ -20,6 +20,10 @@ router.post('/register', authLimiter, async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'All fields are required.' });
     }
 
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password minimal harus 8 karakter.' });
+    }
+
     const normalizedEmail = String(email).trim().toLowerCase();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(normalizedEmail)) {
@@ -306,8 +310,8 @@ router.put('/update-password', verifyToken, authLimiter, async (req, res, next) 
       return res.status(400).json({ success: false, error: 'Password lama dan password baru harus diisi.' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password baru harus minimal 6 karakter.' });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password baru harus minimal 8 karakter.' });
     }
 
     // Ambil user dari DB untuk mencocokkan password lama
@@ -371,13 +375,14 @@ router.post('/forgot-password', authLimiter, async (req, res, next) => {
       });
     }
 
-    // Generate secure random reset token
+    // Generate secure random reset token and store its SHA-256 hash in DB
     const resetToken = crypto.randomBytes(32).toString('hex');
+    const hashedResetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 menit
 
     await pool.query(
       'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE id = $3',
-      [resetToken, expiresAt, user.id]
+      [hashedResetToken, expiresAt, user.id]
     );
 
     const clientUrl = process.env.CLIENT_URL || 'https://stubia.id';
@@ -405,9 +410,10 @@ router.get('/verify-reset-token', async (req, res, next) => {
       return res.status(400).json({ success: false, valid: false, error: 'Token tidak valid.' });
     }
 
+    const hashedToken = crypto.createHash('sha256').update(String(token)).digest('hex');
     const result = await pool.query(
-      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1',
-      [token]
+      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1 OR reset_password_token = $2',
+      [hashedToken, String(token)]
     );
 
     if (result.rows.length === 0) {
@@ -443,13 +449,14 @@ router.post('/reset-password', authLimiter, async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Token dan password baru wajib diisi.' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password baru harus minimal 6 karakter.' });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password baru harus minimal 8 karakter.' });
     }
 
+    const hashedToken = crypto.createHash('sha256').update(String(token)).digest('hex');
     const result = await pool.query(
-      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1',
-      [token]
+      'SELECT id, email, reset_password_expires FROM users WHERE reset_password_token = $1 OR reset_password_token = $2',
+      [hashedToken, String(token)]
     );
 
     if (result.rows.length === 0) {

@@ -971,11 +971,55 @@ router.get('/activity-logs', verifyToken, verifyAdmin, async (req, res, next) =>
   }
 });
 
-// DELETE /api/admin/activity-logs/clear - Admin only: Clear all admin activity logs
+// DELETE /api/admin/activity-logs/clear - Super Admin only with PIN verification (Option B)
 router.delete('/activity-logs/clear', verifyToken, verifyAdmin, async (req, res, next) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Akses ditolak. Hanya Super Admin yang diizinkan.' });
+    }
+
+    const pin = req.body?.pin || req.headers['x-admin-pin'];
+    if (!pin) {
+      return res.status(400).json({ success: false, error: 'PIN Admin diperlukan untuk tindakan pembersihan log.' });
+    }
+
+    const pinRes = await pool.query("SELECT value FROM site_settings WHERE key = 'admin_pin'");
+    const storedPin = pinRes.rows.length > 0 ? pinRes.rows[0].value : '1234';
+    const inputPin = String(pin).trim();
+
+    const bcrypt = require('bcrypt');
+    const crypto = require('crypto');
+    let isMatch = false;
+    if (storedPin.startsWith('$2b$') || storedPin.startsWith('$2a$')) {
+      isMatch = await bcrypt.compare(inputPin, storedPin);
+    } else {
+      const inputBuf = Buffer.from(inputPin);
+      const targetBuf = Buffer.from(storedPin.trim());
+      isMatch = inputBuf.length === targetBuf.length && crypto.timingSafeEqual(inputBuf, targetBuf);
+    }
+
+    if (!isMatch) {
+      return res.status(403).json({ success: false, error: 'PIN Admin tidak valid. Pembersihan log dibatalkan.' });
+    }
+
+    // Delete prior logs
     await pool.query('DELETE FROM admin_activity_logs');
-    res.json({ success: true, message: 'Semua log aktivitas admin berhasil dihapus.' });
+
+    // Immediately record an audit entry of this wipe event so an audit trail is preserved
+    const adminEmail = req.user.email || 'admin';
+    await pool.query(
+      `INSERT INTO admin_activity_logs (admin_id, admin_name, admin_email, action, target_type, target_id, details, ip_address, created_at)
+       VALUES ($1, $2, $3, 'DELETE', 'AUDIT_LOG', 'ALL', $4, $5, NOW())`,
+      [
+        req.user.id,
+        req.user.name || 'Super Admin',
+        adminEmail,
+        'Membersihkan seluruh log aktivitas admin terdahulu (Otorisasi PIN terverifikasi)',
+        req.ip || req.connection?.remoteAddress || '127.0.0.1'
+      ]
+    );
+
+    res.json({ success: true, message: 'Semua log aktivitas terdahulu berhasil dibersihkan dan peristiwa audit telah dicatat.' });
   } catch (error) {
     next(error);
   }

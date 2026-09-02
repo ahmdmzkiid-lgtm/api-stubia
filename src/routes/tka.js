@@ -5,6 +5,7 @@ const { verifyToken, verifyAdmin } = require('../middleware/auth');
 const { logAdminActivity } = require('../utils/activityLogger');
 const { generateQuestionHash } = require('../utils/questionHashUtil');
 const { hasActiveTkaSubscription } = require('../utils/latihanAccessUtil');
+const { reviewTkaQuestion, fixTkaQuestion } = require('../services/nineRouterService');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1225,7 +1226,7 @@ router.post('/admin/topics', [verifyToken, verifyAdmin], async (req, res, next) 
       );
     }
 
-    logAdminActivity(req.user.id, id ? 'UPDATE_TKA_TOPIC' : 'CREATE_TKA_TOPIC', `Topic: ${title}`);
+    logAdminActivity(req, id ? 'UPDATE' : 'CREATE', 'TKA_TOPIC', title, `Topik TKA: ${title}`);
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     next(err);
@@ -1237,7 +1238,7 @@ router.delete('/admin/topics/:id', [verifyToken, verifyAdmin], async (req, res, 
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM tka_topics WHERE id = $1', [id]);
-    logAdminActivity(req.user.id, 'DELETE_TKA_TOPIC', `Topic ID: ${id}`);
+    logAdminActivity(req, 'DELETE', 'TKA_TOPIC', `ID: ${id}`, `Menghapus Topik TKA ID: ${id}`);
     res.json({ success: true, message: 'Topic berhasil dihapus' });
   } catch (err) {
     next(err);
@@ -1376,7 +1377,9 @@ router.post('/admin/questions', [verifyToken, verifyAdmin], async (req, res, nex
     }
 
     await client.query('COMMIT');
-    logAdminActivity(req.user.id, id ? 'UPDATE_TKA_QUESTION' : 'CREATE_TKA_QUESTION', `Question ID: ${questionId}`);
+    const cleanContent = (content || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const qSnippet = cleanContent ? cleanContent.substring(0, 70) : `ID: ${questionId}`;
+    logAdminActivity(req, id ? 'UPDATE' : 'CREATE', 'SOAL_TKA', qSnippet, `${id ? 'Mengubah' : 'Membuat'} soal TKA: "${qSnippet}"`);
     res.json({ success: true, data: { id: questionId } });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1390,8 +1393,21 @@ router.post('/admin/questions', [verifyToken, verifyAdmin], async (req, res, nex
 router.delete('/admin/questions/:id', [verifyToken, verifyAdmin], async (req, res, next) => {
   try {
     const { id } = req.params;
+    const qCheck = await pool.query(
+      `SELECT q.content, s.name as subject_name
+       FROM tka_questions q
+       LEFT JOIN tka_subjects s ON q.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+    const qData = qCheck.rows[0];
+    const rawContent = (qData?.content || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const snippet = rawContent ? rawContent.substring(0, 70) : `ID: ${id}`;
+    const subjectPrefix = qData?.subject_name ? `[${qData.subject_name}] ` : '';
+    const targetTitle = `${subjectPrefix}${snippet}`;
+
     await pool.query('DELETE FROM tka_questions WHERE id = $1', [id]);
-    logAdminActivity(req.user.id, 'DELETE_TKA_QUESTION', `Question ID: ${id}`);
+    logAdminActivity(req, 'DELETE', 'SOAL_TKA', targetTitle, `Menghapus soal TKA: "${targetTitle}"`);
     res.json({ success: true, message: 'Soal TKA berhasil dihapus' });
   } catch (err) {
     next(err);
@@ -1424,7 +1440,7 @@ router.post('/admin/tryout/packages', [verifyToken, verifyAdmin], async (req, re
       );
     }
 
-    logAdminActivity(req.user.id, id ? 'UPDATE_TKA_PACKAGE' : 'CREATE_TKA_PACKAGE', `Package: ${title}`);
+    logAdminActivity(req, id ? 'UPDATE' : 'CREATE', 'TKA_PACKAGE', title, `Paket TKA: ${title}`);
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     next(err);
@@ -1436,7 +1452,7 @@ router.delete('/admin/tryout/packages/:id', [verifyToken, verifyAdmin], async (r
   try {
     const { id } = req.params;
     await pool.query('DELETE FROM tka_tryout_packages WHERE id = $1', [id]);
-    logAdminActivity(req.user.id, 'DELETE_TKA_PACKAGE', `Package ID: ${id}`);
+    logAdminActivity(req, 'DELETE', 'TKA_PACKAGE', `ID: ${id}`, `Menghapus Paket TKA ID: ${id}`);
     res.json({ success: true, message: 'Paket tryout TKA berhasil dihapus' });
   } catch (err) {
     next(err);
@@ -1800,7 +1816,7 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
     }
 
     await client.query('COMMIT');
-    logAdminActivity(req.user.id, 'IMPORT_TKA_EXCEL', `Imported ${importedCount} TKA questions`);
+    logAdminActivity(req, 'CREATE', 'TKA_IMPORT', `File: Excel`, `Mengimpor ${importedCount} soal TKA via Excel`);
     res.json({
       success: true,
       data: { importedCount, rejectedCount, errors }
@@ -1974,5 +1990,171 @@ router.get('/latihan/leaderboard/:subjectId', verifyToken, async (req, res, next
   }
 });
 
+// ============================================================
+// AI REVIEW & FIX TKA SOAL (ADMIN ONLY) - STANDAR KEMENDIKDASMEN
+// ============================================================
+
+// POST /api/tka/admin/questions/:id/ai-review
+router.post('/admin/questions/:id/ai-review', [verifyToken, verifyAdmin], async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const questionRes = await pool.query(
+      `SELECT q.id, q.content, q.difficulty, q.stimulus, q.question_type, q.image_url, q.education_level, 
+              s.name as subject_name, s.full_name as subject_full_name
+       FROM tka_questions q 
+       LEFT JOIN tka_subjects s ON q.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (questionRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Soal TKA tidak ditemukan' });
+    }
+
+    const question = questionRes.rows[0];
+
+    const choicesRes = await pool.query(
+      `SELECT id, label, content, is_correct, explanation
+       FROM tka_answer_choices WHERE question_id = $1
+       ORDER BY label ASC`,
+      [id]
+    );
+
+    const reviewResult = await reviewTkaQuestion({
+      content: question.content,
+      stimulus: question.stimulus,
+      difficulty: question.difficulty,
+      choices: choicesRes.rows,
+      questionType: question.question_type,
+      subjectTitle: question.subject_full_name || question.subject_name || 'TKA',
+      educationLevel: question.education_level || 'SMA',
+    });
+
+    logAdminActivity(req, 'VIEW', 'TKA_QUESTION', `Soal ID: ${id}`, `Melihat review AI soal TKA`);
+
+    return res.json({
+      success: true,
+      review: reviewResult,
+    });
+  } catch (error) {
+    console.error('[AI Review TKA] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal melakukan review AI TKA. Silakan coba lagi.',
+    });
+  }
+});
+
+// POST /api/tka/admin/questions/:id/ai-fix-preview
+router.post('/admin/questions/:id/ai-fix-preview', [verifyToken, verifyAdmin], async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reviewNotes } = req.body;
+
+    const questionRes = await pool.query(
+      `SELECT q.id, q.content, q.difficulty, q.stimulus, q.question_type, q.image_url, q.education_level, 
+              s.name as subject_name, s.full_name as subject_full_name
+       FROM tka_questions q 
+       LEFT JOIN tka_subjects s ON q.subject_id = s.id
+       WHERE q.id = $1`,
+      [id]
+    );
+
+    if (questionRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Soal TKA tidak ditemukan' });
+    }
+
+    const question = questionRes.rows[0];
+
+    const choicesRes = await pool.query(
+      `SELECT id, label, content, is_correct, explanation
+       FROM tka_answer_choices WHERE question_id = $1
+       ORDER BY label ASC`,
+      [id]
+    );
+
+    const original = {
+      content: question.content,
+      stimulus: question.stimulus,
+      choices: choicesRes.rows
+    };
+
+    const fixResult = await fixTkaQuestion({
+      content: question.content,
+      stimulus: question.stimulus,
+      choices: choicesRes.rows,
+      questionType: question.question_type,
+      difficulty: question.difficulty,
+      subjectTitle: question.subject_full_name || question.subject_name || 'TKA',
+      educationLevel: question.education_level || 'SMA',
+    }, reviewNotes);
+
+    return res.json({
+      success: true,
+      data: {
+        original,
+        fixed: fixResult
+      }
+    });
+  } catch (error) {
+    console.error('[AI Fix Preview TKA] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal melakukan preview perbaikan AI TKA.',
+    });
+  }
+});
+
+// POST /api/tka/admin/questions/:id/ai-fix-apply
+router.post('/admin/questions/:id/ai-fix-apply', [verifyToken, verifyAdmin], async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { content, stimulus, choices } = req.body;
+
+    if (content !== undefined) {
+      await pool.query(`UPDATE tka_questions SET content = $1 WHERE id = $2`, [content, id]);
+    }
+    if (stimulus !== undefined) {
+      await pool.query(`UPDATE tka_questions SET stimulus = $1 WHERE id = $2`, [stimulus || null, id]);
+    }
+
+    if (choices && Array.isArray(choices)) {
+      for (const choice of choices) {
+        if (choice.id) {
+          const updates = [];
+          const values = [];
+          let paramIdx = 1;
+          
+          if (choice.content !== undefined) {
+            updates.push(`content = $${paramIdx++}`);
+            values.push(choice.content);
+          }
+          if (choice.explanation !== undefined) {
+            updates.push(`explanation = $${paramIdx++}`);
+            values.push(choice.explanation || null);
+          }
+          
+          if (updates.length > 0) {
+            values.push(choice.id);
+            await pool.query(`UPDATE tka_answer_choices SET ${updates.join(', ')} WHERE id = $${paramIdx}`, values);
+          }
+        }
+      }
+    }
+
+    logAdminActivity(req, 'UPDATE', 'TKA_QUESTION', `Soal ID: ${id}`, `Menerapkan perbaikan AI ke soal TKA`);
+    
+    return res.json({ success: true, message: 'Perbaikan yang dipilih berhasil diterapkan!' });
+  } catch (error) {
+    console.error('[AI Fix Apply TKA] Error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Gagal menerapkan perbaikan AI TKA.',
+    });
+  }
+});
+
 module.exports = router;
+
 

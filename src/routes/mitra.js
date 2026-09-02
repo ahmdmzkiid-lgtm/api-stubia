@@ -8,6 +8,7 @@ const { pool } = require('../config/db');
 const { getJwtSecret } = require('../config/jwt');
 const { verifyToken, verifyAdmin } = require('../middleware/auth');
 const { logAdminActivity } = require('../utils/activityLogger');
+const { authLimiter } = require('../middleware/rateLimiter');
 const cloudinary = require('../config/cloudinary');
 
 // ─── MULTER CONFIG FOR IN-MEMORY FILE UPLOADS ───
@@ -119,7 +120,7 @@ function maskOrderId(orderId) {
 // =========================================================================
 
 // POST /api/mitra/auth/register - Register new mitra
-router.post('/auth/register', (req, res, next) => {
+router.post('/auth/register', authLimiter, (req, res, next) => {
   upload.single('ktp_image')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -163,8 +164,8 @@ router.post('/auth/register', (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Nomor NIK KTP harus terdiri dari 16 digit angka.' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password minimal 6 karakter.' });
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password minimal 8 karakter.' });
     }
 
     // Check email uniqueness
@@ -295,7 +296,7 @@ router.post('/auth/register', (req, res, next) => {
 });
 
 // POST /api/mitra/auth/login - Login mitra
-router.post('/auth/login', async (req, res, next) => {
+router.post('/auth/login', authLimiter, async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -407,15 +408,15 @@ router.put('/auth/profile', verifyMitraToken, async (req, res, next) => {
 });
 
 // POST /api/mitra/auth/change-password - Change password
-router.post('/auth/change-password', verifyMitraToken, async (req, res, next) => {
+router.post('/auth/change-password', verifyMitraToken, authLimiter, async (req, res, next) => {
   try {
     const { current_password, new_password } = req.body;
     if (!current_password || !new_password) {
       return res.status(400).json({ success: false, error: 'Password lama dan baru wajib diisi.' });
     }
 
-    if (new_password.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password baru minimal 6 karakter.' });
+    if (new_password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password baru minimal 8 karakter.' });
     }
 
     const userRes = await pool.query('SELECT password_hash FROM mitra_users WHERE id = $1', [req.mitra.id]);

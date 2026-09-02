@@ -172,7 +172,10 @@ router.post('/document', verifyToken, (req, res, next) => {
   }
 });
 
-// Public Upload single image (No token required)
+// Whitelisted folders permitted for unauthenticated public uploads (job applications)
+const PUBLIC_ALLOWED_FOLDERS = ['photos', 'ktps', 'cvs', 'portfolios', 'general'];
+
+// Public Upload single image (No token required - strictly restricted to job applicants)
 router.post('/public/image', publicUploadLimiter, (req, res, next) => {
   upload.single('image')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -191,7 +194,10 @@ router.post('/public/image', publicUploadLimiter, (req, res, next) => {
       return res.status(400).json({ success: false, error: 'File gambar tidak ditemukan' });
     }
 
-    const folder = sanitizeFolder(req.body.folder, 'stubia');
+    let folder = sanitizeFolder(req.body.folder, 'photos');
+    if (!PUBLIC_ALLOWED_FOLDERS.includes(folder)) {
+      folder = 'photos';
+    }
 
     // Upload to Cloudinary using buffer
     const result = await new Promise((resolve, reject) => {
@@ -227,7 +233,7 @@ router.post('/public/image', publicUploadLimiter, (req, res, next) => {
   }
 });
 
-// Public Upload document (No token required)
+// Public Upload document (No token required - strictly restricted to job applicants)
 router.post('/public/document', publicUploadLimiter, (req, res, next) => {
   documentUpload.single('document')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -246,7 +252,10 @@ router.post('/public/document', publicUploadLimiter, (req, res, next) => {
       return res.status(400).json({ success: false, error: 'File dokumen tidak ditemukan' });
     }
 
-    const folder = sanitizeFolder(req.body.folder, 'documents');
+    let folder = sanitizeFolder(req.body.folder, 'cvs');
+    if (!PUBLIC_ALLOWED_FOLDERS.includes(folder)) {
+      folder = 'cvs';
+    }
 
     // Upload to Cloudinary using buffer
     const result = await new Promise((resolve, reject) => {

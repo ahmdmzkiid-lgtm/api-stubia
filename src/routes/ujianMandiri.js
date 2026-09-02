@@ -684,12 +684,27 @@ router.delete(
   [verifyToken, verifyAdmin],
   async (req, res, next) => {
     try {
+      const qCheck = await pool.query(
+        `SELECT q.content, um.nama_ujian
+         FROM um_questions q
+         LEFT JOIN ujian_mandiri um ON q.ujian_id = um.id
+         WHERE q.id = $1`,
+        [req.params.id],
+      );
+      const qData = qCheck.rows[0];
+      const rawContent = (qData?.content || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+      const snippet = rawContent ? rawContent.substring(0, 70) : `ID: ${req.params.id}`;
+      const prefix = qData?.nama_ujian ? `[${qData.nama_ujian}] ` : '';
+      const targetTitle = `${prefix}${snippet}`;
+
       const result = await pool.query(
         "DELETE FROM um_questions WHERE id = $1 RETURNING id",
         [req.params.id],
       );
       if (result.rows.length === 0)
         return res.status(404).json({ success: false, error: "Not found" });
+
+      logAdminActivity(req, 'DELETE', 'SOAL_UM', targetTitle, `Menghapus soal Ujian Mandiri: "${targetTitle}"`);
       res.json({ success: true });
     } catch (error) {
       next(error);

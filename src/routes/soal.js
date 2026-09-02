@@ -1059,7 +1059,7 @@ router.delete("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      "DELETE FROM questions WHERE id = $1 RETURNING id",
+      `DELETE FROM questions WHERE id = $1 RETURNING id, content, (SELECT name FROM subjects WHERE id = questions.subject_id) as subject_name`,
       [id],
     );
     if (result.rows.length === 0) {
@@ -1067,7 +1067,13 @@ router.delete("/:id", verifyToken, verifyAdmin, async (req, res, next) => {
         .status(404)
         .json({ success: false, error: "Soal tidak ditemukan" });
     }
-    logAdminActivity(req, 'DELETE', 'SOAL', `Soal ID: ${id}`, `Menghapus soal UTBK (ID: ${id})`);
+    const qData = result.rows[0];
+    const rawContent = (qData?.content || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const snippet = rawContent ? rawContent.substring(0, 70) : `ID: ${id}`;
+    const subjectPrefix = qData?.subject_name ? `[${qData.subject_name}] ` : '';
+    const targetTitle = `${subjectPrefix}${snippet}`;
+
+    logAdminActivity(req, 'DELETE', 'SOAL', targetTitle, `Menghapus soal UTBK: "${targetTitle}"`);
     res.json({ success: true, message: "Soal berhasil dihapus" });
   } catch (error) {
     next(error);

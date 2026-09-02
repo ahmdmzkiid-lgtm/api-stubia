@@ -260,9 +260,9 @@ router.get("/tryout/session/:sessionId/questions", verifyToken, async (req, res,
 
       const questionIds = qRes.rows.map((q) => q.id);
 
-      // Get choices
+      // Get choices (only safe fields during active session; is_correct & explanation omitted)
       const choicesRes = await pool.query(
-        `SELECT * FROM skd_answer_choices WHERE question_id = ANY($1::uuid[]) ORDER BY label ASC`,
+        `SELECT id, question_id, label, content FROM skd_answer_choices WHERE question_id = ANY($1::uuid[]) ORDER BY label ASC`,
         [questionIds]
       );
       const choicesMap = {};
@@ -666,7 +666,7 @@ router.post("/latihan/start", verifyToken, async (req, res, next) => {
 
     const questionIds = questions.map((q) => q.id);
     const choicesRes = await pool.query(
-      "SELECT * FROM skd_answer_choices WHERE question_id = ANY($1::uuid[]) ORDER BY label ASC",
+      "SELECT id, question_id, label, content FROM skd_answer_choices WHERE question_id = ANY($1::uuid[]) ORDER BY label ASC",
       [questionIds]
     );
     const choicesMap = {};
@@ -948,7 +948,7 @@ router.post("/admin/subjects/:subjectId/topics", [verifyToken, verifyAdmin], asy
         required_plan ?? "gratis"
       ]
     );
-    await logAdminActivity(req.user.id, "create", "skd_topic", result.rows[0].id, { title });
+    await logAdminActivity(req, "CREATE", "SKD_TOPIC", title, `Membuat topik SKD: ${title}`);
     res.json({ success: true, data: result.rows[0] });
   } catch (err) { next(err); }
 });
@@ -1119,7 +1119,21 @@ router.patch("/admin/questions/:id", [verifyToken, verifyAdmin], async (req, res
 // DELETE question
 router.delete("/admin/questions/:id", [verifyToken, verifyAdmin], async (req, res, next) => {
   try {
+    const qCheck = await pool.query(
+      `SELECT q.content, s.name as subject_name
+       FROM skd_questions q
+       LEFT JOIN skd_subjects s ON q.subject_id = s.id
+       WHERE q.id = $1`,
+      [req.params.id]
+    );
+    const qData = qCheck.rows[0];
+    const rawContent = (qData?.content || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const snippet = rawContent ? rawContent.substring(0, 70) : `ID: ${req.params.id}`;
+    const subjectPrefix = qData?.subject_name ? `[${qData.subject_name}] ` : '';
+    const targetTitle = `${subjectPrefix}${snippet}`;
+
     await pool.query("DELETE FROM skd_questions WHERE id = $1", [req.params.id]);
+    logAdminActivity(req, 'DELETE', 'SOAL_SKD', targetTitle, `Menghapus soal SKD: "${targetTitle}"`);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -1292,7 +1306,7 @@ router.post("/admin/packages", [verifyToken, verifyAdmin], async (req, res, next
         icon ?? "assignment"
       ]
     );
-    await logAdminActivity(req.user.id, "create", "skd_package", result.rows[0].id, { title });
+    await logAdminActivity(req, "CREATE", "SKD_PACKAGE", title, `Membuat paket SKD: ${title}`);
     res.json({ success: true, data: result.rows[0] });
   } catch (err) { next(err); }
 });

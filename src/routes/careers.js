@@ -3,6 +3,7 @@ const router = express.Router();
 const { pool } = require('../config/db');
 const { verifyToken, verifyAdmin } = require('../middleware/auth');
 const { logAdminActivity } = require('../utils/activityLogger');
+const { careerApplyLimiter } = require('../middleware/rateLimiter');
 const { getJwtSecret } = require('../config/jwt');
 
 // GET /api/careers - Public: Get active job vacancies
@@ -65,7 +66,7 @@ router.delete('/applications/:id', verifyToken, verifyAdmin, async (req, res, ne
 });
 
 // POST /api/careers/:id/apply - Public: Submit application for a job vacancy
-router.post('/:id/apply', async (req, res, next) => {
+router.post('/:id/apply', careerApplyLimiter, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { 

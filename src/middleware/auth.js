@@ -33,13 +33,15 @@ const verifyAdmin = async (req, res, next) => {
 
     let role = req.user.role;
 
-    // Verify against DB to handle dynamic updates
-    const result = await pool.query("SELECT role FROM users WHERE id = $1", [
+    // Verify against DB to handle dynamic updates and ensure name/email are available
+    const result = await pool.query("SELECT id, name, email, role FROM users WHERE id = $1", [
       req.user.id,
     ]);
     if (result.rows.length > 0) {
+      req.user.name = result.rows[0].name;
+      req.user.email = result.rows[0].email;
+      req.user.role = result.rows[0].role;
       role = result.rows[0].role;
-      req.user.role = role;
     }
 
     // Super Admin has full access
