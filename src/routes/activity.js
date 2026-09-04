@@ -548,19 +548,86 @@ router.get("/riwayat", verifyToken, async (req, res, next) => {
              ua.session_id,
              ua.question_id,
              ua.chosen_choice_id,
-             ua.is_correct,
+             COALESCE(ac.is_correct, false) AS is_correct,
              ua.time_spent_sec,
              ua.answer_text,
-             q.difficulty,
-             q.question_type,
-             s.name AS subject_name
+             COALESCE(q.difficulty, 'medium') AS difficulty,
+             COALESCE(q.question_type, 'multiple_choice') AS question_type,
+             COALESCE(s.name, 'Unknown') AS subject_name
            FROM user_answers ua
+           LEFT JOIN answer_choices ac ON ua.chosen_choice_id = ac.id
            JOIN questions q ON ua.question_id = q.id
            LEFT JOIN subjects s ON q.subject_id = s.id
            WHERE ua.session_id = ANY($1)
            ORDER BY ua.session_id, q.id`,
           [allSessionIds]
         );
+
+        // Check if any non-multiple-choice answers need correctness resolution
+        const complexAnswers = ansRes.rows.filter(
+          (a) =>
+            a.question_type &&
+            a.question_type !== 'multiple_choice' &&
+            a.answer_text
+        );
+
+        if (complexAnswers.length > 0) {
+          const complexQIds = [...new Set(complexAnswers.map((a) => a.question_id))];
+          const choicesRes = await pool.query(
+            `SELECT id, question_id, label, content, is_correct FROM answer_choices WHERE question_id = ANY($1)`,
+            [complexQIds]
+          );
+          const choicesByQuestion = new Map();
+          choicesRes.rows.forEach((c) => {
+            if (!choicesByQuestion.has(c.question_id)) choicesByQuestion.set(c.question_id, []);
+            choicesByQuestion.get(c.question_id).push(c);
+          });
+
+          complexAnswers.forEach((ans) => {
+            const choices = choicesByQuestion.get(ans.question_id) || [];
+            if (ans.question_type === 'short_answer') {
+              const correctChoice = choices.find((c) => c.is_correct === true);
+              if (correctChoice && ans.answer_text) {
+                ans.is_correct =
+                  correctChoice.content.trim().toLowerCase() ===
+                  ans.answer_text.trim().toLowerCase();
+              }
+            } else if (ans.question_type === 'complex_mc_tf') {
+              let userAnswersObj = {};
+              try {
+                userAnswersObj = ans.answer_text ? JSON.parse(ans.answer_text) : {};
+              } catch (e) {}
+              ans.is_correct =
+                choices.length > 0 &&
+                choices.every((c) => {
+                  const studentAns = userAnswersObj[c.label];
+                  return studentAns !== undefined && studentAns === c.is_correct;
+                });
+            } else if (ans.question_type === 'complex_mc_multi') {
+              let userSelected = [];
+              try {
+                userSelected = ans.answer_text
+                  ? (typeof ans.answer_text === 'string' ? JSON.parse(ans.answer_text) : ans.answer_text)
+                  : [];
+                if (!Array.isArray(userSelected)) userSelected = [];
+              } catch (e) {
+                userSelected = [];
+              }
+              const correctLabels = choices.filter((c) => c.is_correct).map((c) => c.label);
+              const selectedNormalized = userSelected.map((s) => {
+                const matched = choices.find((c) => c.id === s);
+                return matched ? matched.label : String(s).toUpperCase().trim();
+              });
+              const correctSet = new Set(correctLabels);
+              const userSet = new Set(selectedNormalized);
+              ans.is_correct =
+                correctSet.size > 0 &&
+                correctSet.size === userSet.size &&
+                [...correctSet].every((item) => userSet.has(item));
+            }
+          });
+        }
+
         ansRes.rows.forEach((row) => {
           if (!groupAnswersMap.has(row.session_id)) groupAnswersMap.set(row.session_id, []);
           groupAnswersMap.get(row.session_id).push(row);

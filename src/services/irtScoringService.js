@@ -150,6 +150,273 @@ function thetaToScore(theta, correct = null, total = null) {
 }
 
 /**
+ * Convert theta (ability) + mastery to TKA SMA scale score (200-800)
+ * Official Kemendikdasmen SHTKA Standard:
+ * - Minimum: 200, Maximum: 800
+ * - Mean (theta = 0): 500
+ * - Istimewa threshold: > 725 (corresponding to high theta & high accuracy)
+ *
+ * @param {number} theta - Ability parameter (-4 to 4)
+ * @param {number} correct - Number of correct answers (optional)
+ * @param {number} total - Total answered questions (optional)
+ * @returns {number} TKA SMA score (200-800)
+ */
+function thetaToTkaSmaScore(theta, correct = null, total = null) {
+  const minScore = 200;
+  const maxScore = 800;
+
+  // IRT component: map theta [-3, 3] to [0, 1]
+  const irtNormalized = Math.max(0, Math.min(1, (theta + 3) / 6));
+
+  if (correct === null || total === null || total === 0) {
+    return Math.max(minScore, Math.min(maxScore, Math.round(minScore + irtNormalized * (maxScore - minScore))));
+  }
+
+  // Mastery component: raw percentage correct
+  const masteryNormalized = Math.max(0, Math.min(1, correct / total));
+
+  // 60% IRT difficulty-weighted theta + 40% mastery
+  const blended = 0.6 * irtNormalized + 0.4 * masteryNormalized;
+
+  const finalScore = Math.round(minScore + blended * (maxScore - minScore));
+  return Math.max(minScore, Math.min(maxScore, finalScore));
+}
+
+/**
+ * Determine TKA achievement predicate based on Kemendikdasmen SHTKA standards
+ * @param {number} score - Scaled score (200-800 for SMA, 0-100 for SD/SMP)
+ * @param {string} educationLevel - 'SMA', 'SMP', or 'SD'
+ * @returns {object} { predicate, label, badge, isSpecial, scale, minRequired, color, textColor, bgColor, borderColor, description }
+ */
+function getTkaPredicate(score, educationLevel = 'SMA') {
+  const level = (educationLevel || 'SMA').toUpperCase();
+  const numScore = Number(score) || 0;
+
+  if (level === 'SMA') {
+    // SMA Scale: 200 - 800
+    // Requirement: > 725 is Istimewa
+    if (numScore > 725) {
+      return {
+        predicate: 'Istimewa',
+        label: 'Istimewa',
+        badge: 'Istimewa ⭐',
+        isSpecial: true,
+        scale: '200-800',
+        minRequired: 725,
+        color: '#b45309',
+        textColor: 'text-amber-800',
+        bgColor: 'bg-gradient-to-r from-amber-50 to-yellow-50',
+        borderColor: 'border-amber-300',
+        description: 'Capaian sangat tinggi dengan penguasaan konsep komprehensif dan penalaran analitis mendalam.'
+      };
+    } else if (numScore >= 600) {
+      return {
+        predicate: 'Baik',
+        label: 'Baik',
+        badge: 'Baik',
+        isSpecial: false,
+        scale: '200-800',
+        color: '#0284c7',
+        textColor: 'text-sky-700',
+        bgColor: 'bg-sky-50',
+        borderColor: 'border-sky-200',
+        description: 'Pemahaman materi kuat, konsisten, dan melampaui batas kompetensi minimum yang diharapkan.'
+      };
+    } else if (numScore >= 400) {
+      return {
+        predicate: 'Memadai',
+        label: 'Memadai',
+        badge: 'Memadai',
+        isSpecial: false,
+        scale: '200-800',
+        color: '#16a34a',
+        textColor: 'text-emerald-700',
+        bgColor: 'bg-emerald-50',
+        borderColor: 'border-emerald-200',
+        description: 'Telah menguasai konsep dasar dan memenuhi standar kompetensi minimum yang dipersyaratkan.'
+      };
+    } else {
+      return {
+        predicate: 'Kurang',
+        label: 'Kurang',
+        badge: 'Kurang',
+        isSpecial: false,
+        scale: '200-800',
+        color: '#e11d48',
+        textColor: 'text-rose-700',
+        bgColor: 'bg-rose-50',
+        borderColor: 'border-rose-200',
+        description: 'Memerlukan bimbingan dan penguatan kompetensi lebih lanjut pada materi yang diujikan.'
+      };
+    }
+  }
+
+  // SD & SMP Scale: 0 - 100
+  // Requirement: >= 95 is Istimewa
+  if (numScore >= 95) {
+    return {
+      predicate: 'Istimewa',
+      label: 'Istimewa',
+      badge: 'Istimewa ⭐',
+      isSpecial: true,
+      scale: '0-100',
+      minRequired: 95,
+      color: '#b45309',
+      textColor: 'text-amber-800',
+      bgColor: 'bg-gradient-to-r from-amber-50 to-yellow-50',
+      borderColor: 'border-amber-300',
+      description: 'Capaian sangat tinggi dengan penguasaan konsep komprehensif pada setiap butir soal.'
+    };
+  } else if (numScore >= 76.67) {
+    return {
+      predicate: 'Baik',
+      label: 'Baik',
+      badge: 'Baik',
+      isSpecial: false,
+      scale: '0-100',
+      color: '#0284c7',
+      textColor: 'text-sky-700',
+      bgColor: 'bg-sky-50',
+      borderColor: 'border-sky-200',
+      description: 'Pemahaman konsep baik dan berada di atas ambang kompetensi yang diharapkan.'
+    };
+  } else if (numScore >= 50) {
+    return {
+      predicate: 'Memadai',
+      label: 'Memadai',
+      badge: 'Memadai',
+      isSpecial: false,
+      scale: '0-100',
+      color: '#16a34a',
+      textColor: 'text-emerald-700',
+      bgColor: 'bg-emerald-50',
+      borderColor: 'border-emerald-200',
+      description: 'Memenuhi kompetensi dasar standar kurikulum yang dipersyaratkan.'
+    };
+  } else {
+    return {
+      predicate: 'Kurang',
+      label: 'Kurang',
+      badge: 'Kurang',
+      isSpecial: false,
+      scale: '0-100',
+      color: '#e11d48',
+      textColor: 'text-rose-700',
+      bgColor: 'bg-rose-50',
+      borderColor: 'border-rose-200',
+      description: 'Perlu penguatan materi dan latihan soal lebih intensif.'
+    };
+  }
+}
+
+/**
+ * Calculate TKA score according to education level
+ * - SMA: Uses IRT (3PL) on 200-800 scale. Istimewa if > 725.
+ * - SD & SMP: Uses Classical Test Theory (CTT) proportional 0-100 scale. Istimewa if >= 95.
+ *
+ * @param {object} params
+ * @param {string} params.educationLevel - 'SD', 'SMP', or 'SMA'
+ * @param {Array} params.questions - Array of question objects with subject_id, difficulty, etc.
+ * @param {object} params.userAnsMap - Map of question_id -> user answer object
+ * @param {object} params.choicesByQuestion - Map of question_id -> choices
+ * @param {function} params.evaluateAnswerFn - Function to evaluate if answer is correct
+ * @returns {object} { overallTotalScore, subjectStats, overallPredicate, scale, scoringMethod, materiItems }
+ */
+function calculateTkaScore({
+  educationLevel = 'SMA',
+  questions = [],
+  userAnsMap = {},
+  choicesByQuestion = {},
+  evaluateAnswerFn
+}) {
+  const isSma = String(educationLevel).toUpperCase() === 'SMA';
+  const subjectStats = {};
+  const materiItems = [];
+  const subjectResponses = {};
+
+  for (const q of questions) {
+    const sId = q.subject_id;
+    const sName = q.subject_name;
+
+    if (!subjectStats[sId]) {
+      subjectStats[sId] = {
+        subject_id: sId,
+        subject_name: sName,
+        group_category: q.group_category || 'wajib',
+        total: 0,
+        correct: 0,
+        score: 0,
+        theta: 0,
+        predicate: null
+      };
+      subjectResponses[sId] = [];
+    }
+    subjectStats[sId].total += 1;
+
+    const ua = userAnsMap[q.id];
+    const qChoices = choicesByQuestion[q.id] || [];
+    const isCorrect = (ua && evaluateAnswerFn) ? evaluateAnswerFn(q.question_type, qChoices, ua) : false;
+
+    if (isCorrect) {
+      subjectStats[sId].correct += 1;
+    }
+
+    const difficulty = q.difficulty || 'medium';
+    const irtParams = DEFAULT_IRT_PARAMS[difficulty] || DEFAULT_IRT_PARAMS.medium;
+
+    subjectResponses[sId].push({
+      isCorrect,
+      difficulty,
+      irtParams,
+      questionId: q.id
+    });
+
+    materiItems.push({
+      subject_id: q.subject_id,
+      subject_name: q.subject_name || 'Mata Pelajaran',
+      topic_title: q.topic_title || 'Materi Umum',
+      is_correct: isCorrect
+    });
+  }
+
+  let totalSubtestScoreSum = 0;
+  let subtestCount = 0;
+
+  for (const sId in subjectStats) {
+    const st = subjectStats[sId];
+    if (isSma) {
+      // SMA: IRT 3PL & 200-800 scale
+      const responses = subjectResponses[sId] || [];
+      const theta = responses.length > 0 ? estimateAbility(responses) : -3;
+      st.theta = Math.round(theta * 100) / 100;
+      st.score = thetaToTkaSmaScore(theta, st.correct, st.total);
+      st.predicate = getTkaPredicate(st.score, 'SMA');
+    } else {
+      // SD & SMP: Classical 0-100 scale, NO IRT
+      st.score = st.total > 0 ? Math.round((st.correct / st.total) * 100 * 10) / 10 : 0;
+      st.predicate = getTkaPredicate(st.score, educationLevel);
+    }
+    totalSubtestScoreSum += st.score;
+    subtestCount += 1;
+  }
+
+  const overallTotalScore = subtestCount > 0
+    ? (isSma ? Math.round(totalSubtestScoreSum / subtestCount) : Math.round((totalSubtestScoreSum / subtestCount) * 10) / 10)
+    : (isSma ? 200 : 0);
+
+  const overallPredicate = getTkaPredicate(overallTotalScore, educationLevel);
+
+  return {
+    overallTotalScore,
+    subjectStats,
+    overallPredicate,
+    scale: isSma ? '200-800' : '0-100',
+    scoringMethod: isSma ? 'IRT-3PL' : 'Classical-CTT',
+    materiItems
+  };
+}
+
+/**
  * Calculate IRT-based score for a tryout session
  * @param {Array} answers - Array of answer objects with difficulty info
  * @returns {object} Detailed IRT scoring results
@@ -655,6 +922,9 @@ module.exports = {
   probability3PL,
   estimateAbility,
   thetaToScore,
+  thetaToTkaSmaScore,
+  getTkaPredicate,
+  calculateTkaScore,
   getStatusFromMastery,
   calibrateItemParams,
   updateItemStats,

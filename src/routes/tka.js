@@ -6,6 +6,13 @@ const { logAdminActivity } = require('../utils/activityLogger');
 const { generateQuestionHash } = require('../utils/questionHashUtil');
 const { hasActiveTkaSubscription } = require('../utils/latihanAccessUtil');
 const { reviewTkaQuestion, fixTkaQuestion } = require('../services/nineRouterService');
+const {
+  calculateTkaScore,
+  thetaToTkaSmaScore,
+  getTkaPredicate,
+  estimateAbility,
+  DEFAULT_IRT_PARAMS
+} = require('../services/irtScoringService');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const upload = multer({ storage: multer.memoryStorage() });
@@ -383,7 +390,7 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
 
     const qIds = answers.map(a => a.question_id);
     const qMapRes = await client.query(
-      `SELECT q.id, q.question_type, q.topic_id, q.options_config, t.title as topic_title
+      `SELECT q.id, q.question_type, q.topic_id, q.difficulty, q.options_config, t.title as topic_title
        FROM tka_questions q
        LEFT JOIN tka_topics t ON q.topic_id = t.id
        WHERE q.id = ANY($1)`,
@@ -406,6 +413,7 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
       qInfoMap[row.id] = {
         question_type: row.question_type,
         topic_id: row.topic_id,
+        difficulty: row.difficulty || 'medium',
         topic_title: row.topic_title || 'Materi Umum',
         options_config: row.options_config || {},
         choices: choicesByQuestion[row.id] || []
@@ -416,6 +424,7 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
     let incorrectCount = 0;
     let unansweredCount = 0;
     const answerAnalysisItems = [];
+    const irtResponses = [];
 
     for (const ans of answers) {
       const qInfo = qInfoMap[ans.question_id];
@@ -435,6 +444,15 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
         }
       }
 
+      const diff = qInfo?.difficulty || 'medium';
+      const irtParams = DEFAULT_IRT_PARAMS[diff] || DEFAULT_IRT_PARAMS.medium;
+      irtResponses.push({
+        isCorrect: hasAnswer ? isCorrect : false,
+        difficulty: diff,
+        irtParams,
+        questionId: ans.question_id
+      });
+
       answerAnalysisItems.push({
         subject_id: subject_id,
         subject_name: subjectName,
@@ -444,7 +462,17 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
     }
 
     const totalQuestions = answers.length;
-    const totalScore = calculateScaledScore(correctCount, totalQuestions);
+    const isSma = (education_level || 'SMA').toUpperCase() === 'SMA';
+    let totalScore = 0;
+
+    if (isSma) {
+      const theta = irtResponses.length > 0 ? estimateAbility(irtResponses) : -3;
+      totalScore = thetaToTkaSmaScore(theta, correctCount, totalQuestions);
+    } else {
+      totalScore = calculateScaledScore(correctCount, totalQuestions);
+    }
+
+    const predicate = getTkaPredicate(totalScore, education_level || 'SMA');
     const materiAnalysis = generateMateriAnalysis(answerAnalysisItems);
 
     const sessionRes = await client.query(
@@ -470,7 +498,18 @@ router.post('/latihan/submit', verifyToken, async (req, res, next) => {
     }
 
     await client.query('COMMIT');
-    res.json({ success: true, data: { session_id: sessionId, score: totalScore, materi_analysis: materiAnalysis } });
+    res.json({
+      success: true,
+      data: {
+        session_id: sessionId,
+        score: totalScore,
+        total_score: totalScore,
+        predicate,
+        scale: isSma ? '200-800' : '0-100',
+        scoring_method: isSma ? 'IRT-3PL' : 'Classical-CTT',
+        materi_analysis: materiAnalysis
+      }
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -571,6 +610,9 @@ router.get('/latihan/hasil/:sessionId', verifyToken, async (req, res, next) => {
     } catch (e) {
       console.error("Error calculating latihan rank:", e);
     }
+
+    session.predicate = getTkaPredicate(session.total_score, session.education_level);
+    session.scale = (session.education_level || 'SMA').toUpperCase() === 'SMA' ? '200-800' : '0-100';
 
     res.json({
       success: true,
@@ -886,7 +928,7 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
     }
 
     let qQuery = `
-      SELECT q.id, q.subject_id, q.topic_id, q.question_type, q.options_config, s.name as subject_name, s.group_category, t.title as topic_title
+      SELECT q.id, q.subject_id, q.topic_id, q.difficulty, q.question_type, q.options_config, s.name as subject_name, s.group_category, t.title as topic_title
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
       LEFT JOIN tka_topics t ON q.topic_id = t.id
@@ -925,45 +967,21 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
       userAnsMap[ua.question_id] = ua;
     }
 
-    const subjectStats = {};
-    const materiItems = [];
+    const {
+      overallTotalScore,
+      subjectStats,
+      overallPredicate,
+      scale,
+      scoringMethod,
+      materiItems
+    } = calculateTkaScore({
+      educationLevel: session.education_level,
+      questions,
+      userAnsMap,
+      choicesByQuestion,
+      evaluateAnswerFn: evaluateTkaQuestionAnswer
+    });
 
-    for (const q of questions) {
-      const sId = q.subject_id;
-      const sName = q.subject_name;
-
-      if (!subjectStats[sId]) {
-        subjectStats[sId] = { subject_id: sId, subject_name: sName, total: 0, correct: 0, score: 0 };
-      }
-      subjectStats[sId].total += 1;
-
-      const ua = userAnsMap[q.id];
-      const qChoices = choicesByQuestion[q.id] || [];
-      const isCorrect = ua ? evaluateTkaQuestionAnswer(q.question_type, qChoices, ua) : false;
-
-      if (isCorrect) {
-        subjectStats[sId].correct += 1;
-      }
-
-      materiItems.push({
-        subject_id: q.subject_id,
-        subject_name: q.subject_name || 'Mata Pelajaran',
-        topic_title: q.topic_title || 'Materi Umum',
-        is_correct: isCorrect
-      });
-    }
-
-    let totalSubtestScoreSum = 0;
-    let subtestCount = 0;
-
-    for (const sId in subjectStats) {
-      const st = subjectStats[sId];
-      st.score = calculateScaledScore(st.correct, st.total);
-      totalSubtestScoreSum += st.score;
-      subtestCount += 1;
-    }
-
-    const overallTotalScore = subtestCount > 0 ? Math.round((totalSubtestScoreSum / subtestCount) * 10) / 10 : 0;
     const materiAnalysis = generateMateriAnalysis(materiItems);
 
     await client.query(
@@ -983,6 +1001,9 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
         session_id,
         total_score: overallTotalScore,
         score_breakdown: subjectStats,
+        predicate: overallPredicate,
+        scale,
+        scoring_method: scoringMethod,
         materi_analysis: materiAnalysis
       }
     });
@@ -1107,6 +1128,9 @@ router.get('/tryout/hasil/:sessionId', verifyToken, async (req, res, next) => {
     } catch (e) {
       console.error("Error calculating tryout rank:", e);
     }
+
+    session.predicate = getTkaPredicate(session.total_score, session.education_level);
+    session.scale = (session.education_level || 'SMA').toUpperCase() === 'SMA' ? '200-800' : '0-100';
 
     res.json({
       success: true,
@@ -1517,11 +1541,15 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
 
     const keys = Object.keys(row);
     if (keys.length === 0) return '';
+    const knownStandardCols = [
+      'soal', 'content', 'stimulus', 'wacana', 'bacaan', 'opsi a', 'a', 'opsi b', 'b',
+      'opsi c', 'c', 'opsi d', 'd', 'opsi e', 'e', 'kunci', 'kunci jawaban',
+      'pembahasan', 'explanation', 'penjelasan', 'gambar', 'image', 'url gambar', 'foto', 'no', 'nomor', '#', 'id'
+    ];
     if (pos === 'start') {
       const firstKey = keys[0];
       const cleanKey = firstKey.replace(/^\uFEFF/, '').trim().toLowerCase();
-      const isKnownStandardCol = ['soal', 'content', 'stimulus', 'opsi a', 'a', 'opsi b', 'b', 'kunci', 'kunci jawaban'].includes(cleanKey);
-      if (!isKnownStandardCol) {
+      if (!knownStandardCols.includes(cleanKey)) {
         const val = row[firstKey];
         if (val !== null && val !== undefined && String(val).trim() !== '') {
           return String(val).trim();
@@ -1530,8 +1558,7 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
     } else if (pos === 'end') {
       const lastKey = keys[keys.length - 1];
       const cleanKey = lastKey.replace(/^\uFEFF/, '').trim().toLowerCase();
-      const isKnownStandardCol = ['soal', 'opsi a', 'opsi b', 'opsi c', 'opsi d', 'opsi e', 'kunci'].includes(cleanKey);
-      if (!isKnownStandardCol) {
+      if (!knownStandardCols.includes(cleanKey)) {
         const val = row[lastKey];
         if (val !== null && val !== undefined && String(val).trim() !== '') {
           return String(val).trim();
@@ -1577,15 +1604,12 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
       let rawMateri = resolve(row, 'materi');
       let rawDifficulty = resolve(row, 'tingkat_kesulitan');
 
-      // Check positional fallback if not matched by header alias (urutan awal / urutan akhir)
+      // Check positional fallback if not matched by header alias (only check start column, avoid row numbers and long text)
       if (!rawMateri) {
         const candidateStart = resolveWithPositionalFallback(row, 'materi', 'start');
-        const candidateEnd = resolveWithPositionalFallback(row, 'materi', 'end');
         const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
-        if (candidateStart && !diffKeywords.includes(candidateStart.toLowerCase())) {
+        if (candidateStart && !diffKeywords.includes(candidateStart.toLowerCase()) && !/^\d+$/.test(candidateStart) && candidateStart.length <= 100) {
           rawMateri = candidateStart;
-        } else if (candidateEnd && !diffKeywords.includes(candidateEnd.toLowerCase())) {
-          rawMateri = candidateEnd;
         }
       }
 
@@ -1701,12 +1725,13 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
 
       // Resolve topic/materi per question (auto-link or auto-create topic if named)
       let resolvedTopicId = topic_id || null;
-      if (rawMateri) {
-        const materiKey = rawMateri.toLowerCase().trim();
+      if (rawMateri && rawMateri.trim()) {
+        const cleanMateri = rawMateri.trim().substring(0, 255);
+        const materiKey = cleanMateri.toLowerCase();
         if (!topicCache[materiKey]) {
           const tRes = await client.query(
             `SELECT id FROM tka_topics WHERE subject_id = $1 AND LOWER(TRIM(title)) = LOWER(TRIM($2)) LIMIT 1`,
-            [subject_id, rawMateri.trim()]
+            [subject_id, cleanMateri]
           );
           if (tRes.rows.length > 0) {
             topicCache[materiKey] = tRes.rows[0].id;
@@ -1714,7 +1739,7 @@ router.post('/admin/import/excel', [verifyToken, verifyAdmin], upload.single('fi
             const newTopicRes = await client.query(
               `INSERT INTO tka_topics (subject_id, title, difficulty_level, display_order)
                VALUES ($1, $2, 'Dasar', 0) RETURNING id`,
-              [subject_id, rawMateri.trim()]
+              [subject_id, cleanMateri]
             );
             topicCache[materiKey] = newTopicRes.rows[0].id;
           }

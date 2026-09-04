@@ -89,11 +89,15 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
 
     const keys = Object.keys(row);
     if (keys.length === 0) return '';
+    const knownStandardCols = [
+      'soal', 'content', 'stimulus', 'wacana', 'bacaan', 'opsi a', 'a', 'opsi b', 'b',
+      'opsi c', 'c', 'opsi d', 'd', 'opsi e', 'e', 'kunci', 'kunci jawaban',
+      'pembahasan', 'explanation', 'penjelasan', 'gambar', 'image', 'url gambar', 'foto', 'no', 'nomor', '#', 'id'
+    ];
     if (pos === 'start') {
       const firstKey = keys[0];
       const cleanKey = firstKey.replace(/^\uFEFF/, '').trim().toLowerCase();
-      const isKnownStandardCol = ['soal', 'content', 'stimulus', 'opsi a', 'a', 'opsi b', 'b', 'kunci', 'kunci jawaban'].includes(cleanKey);
-      if (!isKnownStandardCol) {
+      if (!knownStandardCols.includes(cleanKey)) {
         const val = row[firstKey];
         if (val !== null && val !== undefined && String(val).trim() !== '') {
           return String(val).trim();
@@ -102,8 +106,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
     } else if (pos === 'end') {
       const lastKey = keys[keys.length - 1];
       const cleanKey = lastKey.replace(/^\uFEFF/, '').trim().toLowerCase();
-      const isKnownStandardCol = ['soal', 'opsi a', 'opsi b', 'opsi c', 'opsi d', 'opsi e', 'kunci'].includes(cleanKey);
-      if (!isKnownStandardCol) {
+      if (!knownStandardCols.includes(cleanKey)) {
         const val = row[lastKey];
         if (val !== null && val !== undefined && String(val).trim() !== '') {
           return String(val).trim();
@@ -168,20 +171,9 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
       const row = results[i];
       const rowNum = i + 2; // row 1 = header
 
-      let rawMateri = resolve(row, 'materi');
+      // UTBK: Only resolve materi if explicit column exists; do not guess via positional fallback
+      const rawMateri = resolve(row, 'materi');
       let rawDifficulty = resolve(row, 'tingkat_kesulitan');
-
-      // Check positional fallback if not matched by header alias
-      if (!rawMateri) {
-        const candidateStart = resolveWithPositionalFallback(row, 'materi', 'start');
-        const candidateEnd = resolveWithPositionalFallback(row, 'materi', 'end');
-        const diffKeywords = ['mudah', 'easy', 'sedang', 'medium', 'sulit', 'hard', 'dasar', 'menengah', 'sukar', 'hots'];
-        if (candidateStart && !diffKeywords.includes(candidateStart.toLowerCase())) {
-          rawMateri = candidateStart;
-        } else if (candidateEnd && !diffKeywords.includes(candidateEnd.toLowerCase())) {
-          rawMateri = candidateEnd;
-        }
-      }
 
       if (!rawDifficulty) {
         const candidateStart = resolveWithPositionalFallback(row, 'tingkat_kesulitan', 'start');
@@ -409,14 +401,15 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
         }
       }
 
-      // Resolve topic/materi per question (auto-link or auto-create topic if named)
+      // Resolve topic/materi per question (auto-link or auto-create topic if explicitly named)
       let resolvedTopicId = topic_id || null;
-      if (rawMateri) {
-        const materiKey = rawMateri.toLowerCase().trim();
+      if (rawMateri && rawMateri.trim()) {
+        const cleanMateri = rawMateri.trim().substring(0, 255);
+        const materiKey = cleanMateri.toLowerCase();
         if (!topicCache[materiKey]) {
           const tRes = await client.query(
             `SELECT id FROM topics WHERE subject_id = $1 AND LOWER(TRIM(title)) = LOWER(TRIM($2)) LIMIT 1`,
-            [subject_id, rawMateri.trim()]
+            [subject_id, cleanMateri]
           );
           if (tRes.rows.length > 0) {
             topicCache[materiKey] = tRes.rows[0].id;
@@ -424,7 +417,7 @@ router.post('/excel', verifyToken, verifyAdmin, upload.single('file'), async (re
             const newTopicRes = await client.query(
               `INSERT INTO topics (subject_id, title, difficulty_level, card_type)
                VALUES ($1, $2, 'Dasar', 'standard') RETURNING id`,
-              [subject_id, rawMateri.trim()]
+              [subject_id, cleanMateri]
             );
             topicCache[materiKey] = newTopicRes.rows[0].id;
           }
