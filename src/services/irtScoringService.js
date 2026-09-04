@@ -320,6 +320,8 @@ function getTkaPredicate(score, educationLevel = 'SMA') {
  * @param {object} params.userAnsMap - Map of question_id -> user answer object
  * @param {object} params.choicesByQuestion - Map of question_id -> choices
  * @param {function} params.evaluateAnswerFn - Function to evaluate if answer is correct
+ * @param {object} params.subtestTimes - Map of subject_id -> actual time spent in seconds
+ * @param {string|Date} params.sessionStartedAt - Session start timestamp for duration fallback
  * @returns {object} { overallTotalScore, subjectStats, overallPredicate, scale, scoringMethod, materiItems }
  */
 function calculateTkaScore({
@@ -327,7 +329,9 @@ function calculateTkaScore({
   questions = [],
   userAnsMap = {},
   choicesByQuestion = {},
-  evaluateAnswerFn
+  evaluateAnswerFn,
+  subtestTimes = {},
+  sessionStartedAt = null
 }) {
   const isSma = String(educationLevel).toUpperCase() === 'SMA';
   const subjectStats = {};
@@ -343,6 +347,8 @@ function calculateTkaScore({
         subject_id: sId,
         subject_name: sName,
         group_category: q.group_category || 'wajib',
+        duration_minutes: q.duration_minutes || 75,
+        time_spent_sec: 0,
         total: 0,
         correct: 0,
         score: 0,
@@ -354,6 +360,10 @@ function calculateTkaScore({
     subjectStats[sId].total += 1;
 
     const ua = userAnsMap[q.id];
+    if (ua && ua.time_spent_sec) {
+      subjectStats[sId].time_spent_sec += Number(ua.time_spent_sec) || 0;
+    }
+
     const qChoices = choicesByQuestion[q.id] || [];
     const isCorrect = (ua && evaluateAnswerFn) ? evaluateAnswerFn(q.question_type, qChoices, ua) : false;
 
@@ -381,6 +391,30 @@ function calculateTkaScore({
 
   let totalSubtestScoreSum = 0;
   let subtestCount = 0;
+
+  // 1. If explicit subtestTimes provided, override subjectStats time_spent_sec
+  for (const sId in subjectStats) {
+    if (subtestTimes && subtestTimes[sId] && Number(subtestTimes[sId]) > 0) {
+      subjectStats[sId].time_spent_sec = Number(subtestTimes[sId]);
+    }
+  }
+
+  // 2. If all time_spent_sec are 0, check if we have sessionStartedAt to calculate elapsed session time
+  const totalSubj = Object.keys(subjectStats).length;
+  const anyTimeRecorded = Object.values(subjectStats).some(st => (st.time_spent_sec || 0) > 0);
+  if (!anyTimeRecorded && sessionStartedAt && totalSubj > 0) {
+    const startMs = new Date(sessionStartedAt).getTime();
+    const nowMs = Date.now();
+    if (!isNaN(startMs) && nowMs > startMs) {
+      const elapsedSec = Math.round((nowMs - startMs) / 1000);
+      if (elapsedSec > 0 && elapsedSec < 86400) {
+        const perSubjSec = Math.round(elapsedSec / totalSubj);
+        for (const sId in subjectStats) {
+          subjectStats[sId].time_spent_sec = perSubjSec;
+        }
+      }
+    }
+  }
 
   for (const sId in subjectStats) {
     const st = subjectStats[sId];

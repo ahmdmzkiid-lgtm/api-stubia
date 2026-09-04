@@ -862,7 +862,7 @@ router.post('/tryout/submit-answer', verifyToken, async (req, res, next) => {
 // POST /api/tka/tryout/submit-subtest
 router.post('/tryout/submit-subtest', verifyToken, async (req, res, next) => {
   try {
-    const { session_id, subject_id } = req.body;
+    const { session_id, subject_id, time_spent_sec } = req.body;
     if (!session_id || !subject_id) {
       return res.status(400).json({ success: false, error: 'session_id dan subject_id wajib diisi' });
     }
@@ -886,10 +886,52 @@ router.post('/tryout/submit-subtest', verifyToken, async (req, res, next) => {
 
     if (!currentCompleted.includes(subject_id)) {
       currentCompleted.push(subject_id);
-      await pool.query(
-        `UPDATE tka_tryout_sessions SET completed_subtests = $1 WHERE id = $2`,
-        [JSON.stringify(currentCompleted), session_id]
+    }
+
+    let currentBreakdown = {};
+    try {
+      const rawBreakdown = sRes.rows[0].score_breakdown;
+      currentBreakdown = (rawBreakdown && typeof rawBreakdown === 'object') ? rawBreakdown : JSON.parse(rawBreakdown || '{}');
+      if (typeof currentBreakdown !== 'object' || Array.isArray(currentBreakdown)) currentBreakdown = {};
+    } catch (e) {
+      currentBreakdown = {};
+    }
+
+    if (time_spent_sec && Number(time_spent_sec) > 0) {
+      if (!currentBreakdown[subject_id]) currentBreakdown[subject_id] = {};
+      currentBreakdown[subject_id].time_spent_sec = Number(time_spent_sec);
+    }
+
+    await pool.query(
+      `UPDATE tka_tryout_sessions SET completed_subtests = $1, score_breakdown = $2 WHERE id = $3`,
+      [JSON.stringify(currentCompleted), JSON.stringify(currentBreakdown), session_id]
+    );
+
+    // If time_spent_sec was provided, also allocate among user answers of this subject if they were 0
+    if (time_spent_sec && Number(time_spent_sec) > 0) {
+      const userAnswersRes = await pool.query(
+        `SELECT ua.question_id, ua.time_spent_sec
+         FROM tka_user_answers ua
+         JOIN tka_questions q ON ua.question_id = q.id
+         WHERE ua.session_id = $1 AND q.subject_id = $2`,
+        [session_id, subject_id]
       );
+
+      const answeredCount = userAnswersRes.rows.length;
+      if (answeredCount > 0) {
+        const sumMeasured = userAnswersRes.rows.reduce((sum, r) => sum + (Number(r.time_spent_sec) || 0), 0);
+        if (sumMeasured === 0) {
+          const perQ = Math.max(1, Math.round(Number(time_spent_sec) / answeredCount));
+          await pool.query(
+            `UPDATE tka_user_answers
+             SET time_spent_sec = $1
+             WHERE session_id = $2 AND question_id IN (
+               SELECT q.id FROM tka_questions q WHERE q.subject_id = $3
+             )`,
+            [perQ, session_id, subject_id]
+          );
+        }
+      }
     }
 
     res.json({ success: true, message: 'Subtes berhasil diselesaikan', completed_subtests: currentCompleted });
@@ -903,7 +945,7 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { session_id } = req.body;
+    const { session_id, time_spent_sec } = req.body;
     if (!session_id) {
       return res.status(400).json({ success: false, error: 'session_id wajib diisi' });
     }
@@ -914,6 +956,21 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
     }
 
     const session = sRes.rows[0];
+
+    // Extract subtest times previously recorded in score_breakdown
+    const subtestTimes = {};
+    if (session.score_breakdown) {
+      try {
+        const sb = typeof session.score_breakdown === 'string' ? JSON.parse(session.score_breakdown) : session.score_breakdown;
+        if (sb && typeof sb === 'object') {
+          for (const [k, v] of Object.entries(sb)) {
+            if (v && v.time_spent_sec && Number(v.time_spent_sec) > 0) {
+              subtestTimes[k] = Number(v.time_spent_sec);
+            }
+          }
+        }
+      } catch (e) {}
+    }
 
     let electives = [];
     if (session.selected_elective_subjects) {
@@ -928,7 +985,7 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
     }
 
     let qQuery = `
-      SELECT q.id, q.subject_id, q.topic_id, q.difficulty, q.question_type, q.options_config, s.name as subject_name, s.group_category, t.title as topic_title
+      SELECT q.id, q.subject_id, q.topic_id, q.difficulty, q.question_type, q.options_config, s.name as subject_name, s.group_category, s.duration_minutes, t.title as topic_title
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
       LEFT JOIN tka_topics t ON q.topic_id = t.id
@@ -979,7 +1036,9 @@ router.post('/tryout/submit-session', verifyToken, async (req, res, next) => {
       questions,
       userAnsMap,
       choicesByQuestion,
-      evaluateAnswerFn: evaluateTkaQuestionAnswer
+      evaluateAnswerFn: evaluateTkaQuestionAnswer,
+      subtestTimes,
+      sessionStartedAt: session.started_at
     });
 
     const materiAnalysis = generateMateriAnalysis(materiItems);
@@ -1047,8 +1106,8 @@ router.get('/tryout/hasil/:sessionId', verifyToken, async (req, res, next) => {
 
     let qQuery = `
       SELECT q.id, q.subject_id, q.topic_id, q.content, q.stimulus, q.image_url, q.image_position, q.question_type, q.options_config,
-             s.name as subject_name, s.group_category, t.title as topic_title,
-             ua.chosen_choice_id, ua.answer_text, ua.is_flagged
+             s.name as subject_name, s.group_category, s.duration_minutes, t.title as topic_title,
+             ua.chosen_choice_id, ua.answer_text, ua.is_flagged, COALESCE(ua.time_spent_sec, 0) as time_spent_sec
       FROM tka_questions q
       JOIN tka_subjects s ON q.subject_id = s.id
       LEFT JOIN tka_topics t ON q.topic_id = t.id
