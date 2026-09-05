@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const compression = require('compression');
 const { initializeDatabase } = require('./config/db');
 const { populateQuestionHashes } = require('./utils/populateQuestionHashes');
 
@@ -14,6 +15,9 @@ const app = express();
 
 // Trust reverse proxy headers (Hostinger, Cloudflare, Nginx) so client IPs are identified correctly
 app.set('trust proxy', 1);
+
+// Compress all HTTP responses (Gzip/Deflate) to prevent HTTP/2 proxy buffer errors on large JSON data
+app.use(compression());
 
 // === CORS harus SEBELUM Helmet agar preflight OPTIONS tidak di-block ===
 const allowedOrigins = [
