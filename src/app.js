@@ -12,6 +12,9 @@ const { populateQuestionHashes } = require('./utils/populateQuestionHashes');
 
 const app = express();
 
+// Trust reverse proxy headers (Hostinger, Cloudflare, Nginx) so client IPs are identified correctly
+app.set('trust proxy', 1);
+
 // === CORS harus SEBELUM Helmet agar preflight OPTIONS tidak di-block ===
 const allowedOrigins = [
   'https://stubia.id',

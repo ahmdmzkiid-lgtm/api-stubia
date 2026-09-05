@@ -26,5 +26,8 @@
     "pg": "^8.13.1",
     "uuid": "^11.1.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }
